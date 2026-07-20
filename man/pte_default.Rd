@@ -8,8 +8,9 @@ pte_default(
   yname,
   gname,
   tname,
-  idname,
+  idname = NULL,
   data,
+  panel = TRUE,
   xformula = ~1,
   d_outcome = FALSE,
   d_covs_formula = ~-1,
@@ -23,7 +24,8 @@ pte_default(
   alp = 0.05,
   boot_type = "multiplier",
   biters = 100,
-  cl = 1
+  cl = 1,
+  ...
 )
 }
 \arguments{
@@ -35,7 +37,10 @@ pte_default(
 
 \item{idname}{Name of id in \code{data}}
 
-\item{data}{balanced panel data}
+\item{data}{balanced panel or repeated cross sections data}
+
+\item{panel}{Whether the data are panel data.  The default is TRUE.  Set to
+FALSE for repeated cross sections.}
 
 \item{xformula}{one-sided formula for covariates used in the propensity score
 and outcome regression models}
@@ -89,6 +94,9 @@ parameter.}
 \item{biters}{number of bootstrap iterations; default is 100}
 
 \item{cl}{number of clusters to be used when bootstrapping; default is 1}
+
+\item{...}{additional arguments passed to \code{pte}, such as \code{min_e},
+\code{max_e}, and \code{balance_e} for controlling the event study range.}
 }
 \value{
 \code{pte_results} object
@@ -118,6 +126,6 @@ lou_res <- pte_default(
 )
 
 summary(lou_res)
-ggpte(lou_res)
+ggplot2::autoplot(lou_res)
 
 }

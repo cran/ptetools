@@ -32,10 +32,9 @@ did_attgt <- function(gt_data, xformula = ~1, ...) {
   Xpre <- model.frame(xformula, data = subset(gt_data, name == "pre"))
 
   # convert two period panel into one period
-  gt_data_outcomes <- tidyr::pivot_wider(gt_data[, c("D", "id", "period", "name", "Y")],
-    id_cols = c(id, D),
-    names_from = c(name),
-    values_from = c(Y)
+  gt_data_outcomes <- data.table::dcast(
+    data.table::as.data.table(gt_data[, c("D", "id", "period", "name", "Y")]),
+    id + D ~ name, value.var = "Y"
   )
 
   # merge outcome and covariate data
@@ -62,6 +61,53 @@ did_attgt <- function(gt_data, xformula = ~1, ...) {
   )
 
   # return attgt
+  attgt_if(attgt = attgt$ATT, inf_func = attgt$att.inf.func)
+}
+
+#' @title Repeated Cross Sections Difference-in-Differences for ATT(g,t)
+#'
+#' @description Takes a local repeated cross sections data set and computes
+#'  an estimate of a group-time average treatment effect and corresponding
+#'  influence function using a repeated cross sections DID approach.
+#'
+#' @inheritParams did_attgt
+#' @param est_method Which type of estimation method to use. Default is "dr" for
+#'  doubly robust.  The other option is "reg" for regression adjustment.
+#'
+#' @return attgt_if
+#'
+#' @export
+did_rcs_attgt <- function(gt_data, xformula = ~1, est_method = "dr", ...) {
+  gt_data <- droplevels(gt_data)
+
+  y <- gt_data$Y
+  post <- 1 * (gt_data$name == "post")
+  D <- gt_data$D
+  covariates <- model.matrix(xformula, data = gt_data)
+  i.weights <- gt_data$.w / mean(gt_data$.w)
+
+  if (est_method == "dr") {
+    attgt <- DRDID::drdid_rc(
+      y = y,
+      post = post,
+      D = D,
+      covariates = covariates,
+      i.weights = i.weights,
+      inffunc = TRUE
+    )
+  } else if (est_method == "reg") {
+    attgt <- DRDID::reg_did_rc(
+      y = y,
+      post = post,
+      D = D,
+      covariates = covariates,
+      i.weights = i.weights,
+      inffunc = TRUE
+    )
+  } else {
+    stop(paste0("est_method: ", est_method, " is not supported"))
+  }
+
   attgt_if(attgt = attgt$ATT, inf_func = attgt$att.inf.func)
 }
 
@@ -123,10 +169,9 @@ pte_attgt <- function(
   if (ncol(dX) > 0) colnames(dX) <- paste0("d", colnames(dX))
 
   # convert two period panel into one period
-  gt_data_outcomes <- tidyr::pivot_wider(gt_data[, c("D", "id", "period", "name", "Y")],
-    id_cols = c(id, D),
-    names_from = c(name),
-    values_from = c(Y)
+  gt_data_outcomes <- data.table::dcast(
+    data.table::as.data.table(gt_data[, c("D", "id", "period", "name", "Y")]),
+    id + D ~ name, value.var = "Y"
   )
 
   # merge outcome and covariate data
@@ -145,11 +190,10 @@ pte_attgt <- function(
   # to work in levels by just setting outcomes in "first period"
   # to be equal to 0 for all units
   gt_dataX <- droplevels(gt_dataX)
-  use_formula <- BMisc::toformula("", c(BMisc::rhs.vars(xformula), colnames(dX)))
-  if (lagged_outcome_cov) use_formula <- BMisc::addCovToFormla("pre", use_formula)
+  use_formula <- BMisc::toformula("", c(BMisc::rhs_vars(xformula), colnames(dX)))
+  if (lagged_outcome_cov) use_formula <- BMisc::add_cov_to_formula("pre", use_formula)
   covmat <- model.matrix(use_formula, data = gt_dataX)
   covmat2 <- covmat[D == 0, ]
-  # www <- gt_dataX[D==0,]$.w
   n_unt <- sum(1 - D)
   precheck_reg <- qr(t(covmat2) %*% covmat2 / n_unt)
   keep_covs <- precheck_reg$pivot[1:precheck_reg$rank]
@@ -186,35 +230,6 @@ pte_attgt <- function(
       i.weights = (.w / sum(.w)),
       inffunc = TRUE
     )
-    # } else if (est_method == "grf") {
-    #   # sampling weights not supported here
-    #   # code requires custom version of grf package
-    #   tau.forest <- causal_forest(X = covmat, Y = Y, W = D)
-    #   # predict(tau.forest)$predictions[D==1]
-
-    #   grf_res <- average_treatment_effect(tau.forest, method = "AIPW", target.sample = "treated")
-    #   this_n <- nrow(covmat)
-    #   this_if <- as.matrix(grf_res$inf_func * this_n)
-    #   # V <- t(this_if) %*% this_if / this_n
-    #   # sqrt(V) / sqrt(this_n)
-    #   # V <- t(grf_res$inf_func/sqrt(this_n)) %*% grf_res$inf_func/sqrt(this_n)
-    #   attgt <- list(ATT = grf_res$estimate, att.inf.func = this_if)
-    # } else if (est_method == "lasso") {
-    #   # code adapted from: https://thomaswiemann.com/ddml/articles/did.html
-    #   learners <- list(what = ddml::mdl_glmnet)
-    #   learners_DX <- learners
-
-    #   att_fit <- ddml::ddml_att(
-    #     y = Y,
-    #     D = D,
-    #     X = covmat,
-    #     learners = learners,
-    #     learners_DX = learners_DX,
-    #     sample_folds = 10,
-    #     silent = TRUE
-    #   )
-    #   inf.func <- att_fit$psi_b + att_fit$att * att_fit$psi_a
-    #   attgt <- list(ATT = att_fit$att, att.inf.func = inf.func)
   } else {
     stop(paste0("est_method: ", est_method, " is not supported"))
   }

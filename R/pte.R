@@ -1,3 +1,12 @@
+# =============================================================================
+# Title: Core pte Functions
+# Description: compute.pte (inner loop over groups/time periods) and pte
+#   (main user-facing function) for computing panel treatment effects.
+# Author: Brant Callaway
+# Last update: 2026-05-18
+# Date created: 2021-05-14
+# =============================================================================
+
 #' @title Heavy-Lifting for pte Function
 #'
 #' @description Function that actually computes panel treatment effects.
@@ -26,6 +35,7 @@ compute.pte <- function(ptep,
   gname <- ptep$gname
   idname <- ptep$idname
   tname <- ptep$tname
+  panel <- ptep$panel
   base_period <- ptep$base_period
   anticipation <- ptep$anticipation
   global_fun <- ptep$global_fun
@@ -35,9 +45,13 @@ compute.pte <- function(ptep,
 
   # setup data
   G <- data[, gname]
-  id <- data[, idname]
+  if (isTRUE(panel)) {
+    id <- data[, idname]
+  } else {
+    id <- data$.rowid
+  }
   period <- data[, tname]
-  n <- length(unique(data$id))
+  n <- if (isTRUE(panel)) length(unique(data$id)) else nrow(data)
 
   # pick up all time periods
   time.periods <- ptep$tlist
@@ -222,6 +236,12 @@ compute.pte <- function(ptep,
 #'  by the package.  See that function for an example of what this function should
 #'  return.  This is unused except in cases where the results involve doses.
 #'
+#' @param probs For `gt_type = "qtt"`, a numeric vector of quantile levels at
+#'  which to evaluate the QTT curve.  Defaults to `seq(0.05, 0.95, 0.05)`.
+#'
+#' @param aggte_fun An optional function for aggregating group-time
+#'  treatment effects.
+#'
 #' @param ... extra arguments that can be passed to create the correct subsets
 #'  of the data (depending on \code{subset_fun}), to estimate group time
 #'  average treatment effects (depending on \code{attgt_fun}), or to
@@ -248,17 +268,19 @@ compute.pte <- function(ptep,
 #' )
 #'
 #' summary(did_res)
-#' ggpte(did_res)
+#' ggplot2::autoplot(did_res)
 #'
 #' @export
 pte <- function(yname,
                 gname,
                 tname,
-                idname,
+                idname = NULL,
                 data,
                 setup_pte_fun,
                 subset_fun,
                 attgt_fun,
+                aggte_fun = NULL,
+                panel = TRUE,
                 cband = TRUE,
                 alp = 0.05,
                 boot_type = "multiplier",
@@ -270,6 +292,7 @@ pte <- function(yname,
                 group_fun = FALSE,
                 process_dtt_gt_fun = process_dtt_gt,
                 process_dose_gt_fun = process_dose_gt,
+                probs = NULL,
                 biters = 100,
                 cl = 1,
                 call = NULL,
@@ -280,12 +303,14 @@ pte <- function(yname,
     tname = tname,
     idname = idname,
     data = data,
+    panel = panel,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
     gt_type = gt_type,
     weightsname = weightsname,
     ret_quantile = ret_quantile,
+    probs = probs,
     global_fun = global_fun,
     time_period_fun = time_period_fun,
     group_fun = group_fun,
@@ -301,12 +326,6 @@ pte <- function(yname,
     attgt_fun = attgt_fun,
     ...
   )
-
-  # handle distributional results
-  if (gt_type == "dtt") {
-    stop("not supported yet...")
-    return(process_dtt_gt_fun(res, ptep))
-  }
 
   # handle aggregations into dose
   if (gt_type == "dose") {
@@ -324,7 +343,8 @@ pte <- function(yname,
       setup_pte_fun,
       subset_fun,
       attgt_fun,
-      extra_gt_returns = res$extra_gt_returns,
+      extra_gt_returns   = res$extra_gt_returns,
+      aggte_fun          = aggte_fun,
       ...
     ))
   }
@@ -369,6 +389,8 @@ pte <- function(yname,
 #' @inheritParams pte_attgt
 #' @inheritParams pte
 #' @inheritParams pte_params
+#' @param ... additional arguments passed to \code{pte}, such as \code{min_e},
+#'   \code{max_e}, and \code{balance_e} for controlling the event study range.
 #'
 #' @return `pte_results` object
 #'
@@ -390,14 +412,15 @@ pte <- function(yname,
 #' )
 #'
 #' summary(lou_res)
-#' ggpte(lou_res)
+#' ggplot2::autoplot(lou_res)
 #'
 #' @export
 pte_default <- function(yname,
                         gname,
                         tname,
-                        idname,
+                        idname = NULL,
                         data,
+                        panel = TRUE,
                         xformula = ~1,
                         d_outcome = FALSE,
                         d_covs_formula = ~ -1,
@@ -411,16 +434,27 @@ pte_default <- function(yname,
                         alp = 0.05,
                         boot_type = "multiplier",
                         biters = 100,
-                        cl = 1) {
+                        cl = 1,
+                        ...) {
+  use_subset_fun <- if (isTRUE(panel)) two_by_two_subset else two_by_two_rcs_subset
+  use_attgt_fun <- if (isTRUE(panel)) pte_attgt else did_rcs_attgt
+
+  if (!isTRUE(panel) && (isTRUE(d_outcome) ||
+    !identical(d_covs_formula, ~ -1) ||
+    isTRUE(lagged_outcome_cov))) {
+    warning("For panel = FALSE, pte_default uses repeated cross sections DID and ignores d_outcome, d_covs_formula, and lagged_outcome_cov.")
+  }
+
   res <- pte(
     yname = yname,
     gname = gname,
     tname = tname,
     idname = idname,
     data = data,
+    panel = panel,
     setup_pte_fun = setup_pte,
-    subset_fun = two_by_two_subset,
-    attgt_fun = pte_attgt,
+    subset_fun = use_subset_fun,
+    attgt_fun = use_attgt_fun,
     xformula = xformula,
     d_outcome = d_outcome,
     d_covs_formula = d_covs_formula,
@@ -434,7 +468,8 @@ pte_default <- function(yname,
     alp = alp,
     boot_type = boot_type,
     biters = biters,
-    cl = cl
+    cl = cl,
+    ...
   )
 
   res

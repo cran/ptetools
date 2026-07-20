@@ -8,13 +8,15 @@ setup_pte_basic(
   yname,
   gname,
   tname,
-  idname,
+  idname = NULL,
   data,
+  panel = TRUE,
   cband = TRUE,
   alp = 0.05,
   boot_type = "multiplier",
   gt_type = "att",
   ret_quantile = 0.5,
+  probs = NULL,
   biters = 100,
   cl = 1,
   call = NULL,
@@ -30,7 +32,10 @@ setup_pte_basic(
 
 \item{idname}{Name of id in \code{data}}
 
-\item{data}{balanced panel data}
+\item{data}{balanced panel or repeated cross sections data}
+
+\item{panel}{Whether the data are panel data.  The default is TRUE.  Set to
+FALSE for repeated cross sections.}
 
 \item{cband}{whether or not to report a uniform (instead of pointwise)
 confidence band (default is TRUE)}
@@ -46,6 +51,10 @@ their own choices for \code{gt_type}}
 \item{ret_quantile}{For functions that compute quantile treatment effects,
 this is a specific quantile at which to report results, e.g.,
 \code{ret_quantile = 0.5} will return that the qte at the median.}
+
+\item{probs}{For \code{gt_type = "qtt"}, a numeric vector of quantile levels at
+which to evaluate the QTT curve (e.g., \code{seq(0.05, 0.95, 0.05)}).
+Defaults to \code{seq(0.05, 0.95, 0.05)} when NULL.}
 
 \item{biters}{number of bootstrap iterations; default is 100}
 

@@ -8,8 +8,9 @@ setup_pte(
   yname,
   gname,
   tname,
-  idname,
+  idname = NULL,
   data,
+  panel = TRUE,
   required_pre_periods = 1,
   anticipation = 0,
   base_period = "varying",
@@ -19,6 +20,7 @@ setup_pte(
   weightsname = NULL,
   gt_type = "att",
   ret_quantile = 0.5,
+  probs = NULL,
   biters = 100,
   cl = 1,
   call = NULL,
@@ -34,7 +36,10 @@ setup_pte(
 
 \item{idname}{Name of id in \code{data}}
 
-\item{data}{balanced panel data}
+\item{data}{balanced panel or repeated cross sections data}
+
+\item{panel}{Whether the data are panel data.  The default is TRUE.  Set to
+FALSE for repeated cross sections.}
 
 \item{required_pre_periods}{The number of required pre-treatment periods to implement
 the estimation strategy.  Default is 1.}
@@ -69,6 +74,10 @@ their own choices for \code{gt_type}}
 \item{ret_quantile}{For functions that compute quantile treatment effects,
 this is a specific quantile at which to report results, e.g.,
 \code{ret_quantile = 0.5} will return that the qte at the median.}
+
+\item{probs}{For \code{gt_type = "qtt"}, a numeric vector of quantile levels at
+which to evaluate the QTT curve (e.g., \code{seq(0.05, 0.95, 0.05)}).
+Defaults to \code{seq(0.05, 0.95, 0.05)} when NULL.}
 
 \item{biters}{number of bootstrap iterations; default is 100}
 

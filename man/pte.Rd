@@ -11,11 +11,13 @@ pte(
   yname,
   gname,
   tname,
-  idname,
+  idname = NULL,
   data,
   setup_pte_fun,
   subset_fun,
   attgt_fun,
+  aggte_fun = NULL,
+  panel = TRUE,
   cband = TRUE,
   alp = 0.05,
   boot_type = "multiplier",
@@ -27,6 +29,7 @@ pte(
   group_fun = FALSE,
   process_dtt_gt_fun = process_dtt_gt,
   process_dose_gt_fun = process_dose_gt,
+  probs = NULL,
   biters = 100,
   cl = 1,
   call = NULL,
@@ -42,7 +45,7 @@ pte(
 
 \item{idname}{Name of id in \code{data}}
 
-\item{data}{balanced panel data}
+\item{data}{balanced panel or repeated cross sections data}
 
 \item{setup_pte_fun}{This is a function that should take in \code{data},
 \code{yname} (the name of the outcome variable in \code{data}),
@@ -106,6 +109,12 @@ objects will be computed using the empirical bootstrap.  This is usually
 (perhaps substantially) easier to code, but also will usually be (perhaps
 substantially) computationally slower.}
 
+\item{aggte_fun}{An optional function for aggregating group-time
+treatment effects.}
+
+\item{panel}{Whether the data are panel data.  The default is TRUE.  Set to
+FALSE for repeated cross sections.}
+
 \item{cband}{whether or not to report a uniform (instead of pointwise)
 confidence band (default is TRUE)}
 
@@ -153,6 +162,9 @@ treatment).  The default is \code{process_dose_gt}, which is a function provided
 by the package.  See that function for an example of what this function should
 return.  This is unused except in cases where the results involve doses.}
 
+\item{probs}{For \code{gt_type = "qtt"}, a numeric vector of quantile levels at
+which to evaluate the QTT curve.  Defaults to \code{seq(0.05, 0.95, 0.05)}.}
+
 \item{biters}{number of bootstrap iterations; default is 100}
 
 \item{cl}{number of clusters to be used when bootstrapping; default is 1}
@@ -191,7 +203,7 @@ did_res <- pte(
 )
 
 summary(did_res)
-ggpte(did_res)
+ggplot2::autoplot(did_res)
 
 }
 \seealso{
@@ -204,5 +216,10 @@ Useful links:
 }
 \author{
 \strong{Maintainer}: Brantly Callaway \email{brantly.callaway@uga.edu}
+
+Authors:
+\itemize{
+  \item Brantly Callaway \email{brantly.callaway@uga.edu}
+}
 
 }

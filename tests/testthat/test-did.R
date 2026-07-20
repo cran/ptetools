@@ -43,8 +43,67 @@ test_that("did basics", {
   expect_equal(res$event_study$att.egt[dyn_idx], cs_dyn)
 })
 
+test_that("repeated cross sections match did", {
+  set.seed(123)
+  sp <- did::reset.sim()
+  data <- did::build_sim_dataset(sp, panel = FALSE)
+
+  res <- suppressWarnings(
+    pte_default(
+      yname = "Y",
+      gname = "G",
+      tname = "period",
+      data = data,
+      panel = FALSE,
+      xformula = ~X,
+      control_group = "notyettreated",
+      cband = FALSE
+    )
+  )
+
+  cs_res <- suppressWarnings(
+    did::att_gt(
+      yname = "Y",
+      gname = "G",
+      tname = "period",
+      data = data,
+      panel = FALSE,
+      xformla = ~X,
+      control_group = "notyettreated",
+      bstrap = FALSE,
+      cband = FALSE
+    )
+  )
+
+  pte_attgt <- data.frame(
+    group = res$att_gt$group,
+    t = res$att_gt$t,
+    att = res$att_gt$att
+  )
+  did_attgt <- data.frame(
+    group = cs_res$group,
+    t = cs_res$t,
+    att = cs_res$att
+  )
+  pte_attgt <- pte_attgt[order(pte_attgt$group, pte_attgt$t), ]
+  did_attgt <- did_attgt[order(did_attgt$group, did_attgt$t), ]
+  row.names(pte_attgt) <- NULL
+  row.names(did_attgt) <- NULL
+
+  expect_equal(pte_attgt, did_attgt, tolerance = 1e-8)
+
+  cs_overall <- did::aggte(cs_res, type = "group")$overall.att
+  expect_equal(res$overall_att$overall.att, cs_overall, tolerance = 1e-8)
+
+  cs_dynamic <- did::aggte(cs_res, type = "dynamic")$att.egt
+  expect_equal(res$event_study$att.egt, cs_dynamic, tolerance = 1e-8)
+})
+
 test_that("empirical bootstrap", {
-  skip("empirical bootstrap fails because naming conventions are different")
+  # Skipped pending API alignment: pte_emp_boot uses $overall_results$att
+  # while pte_results uses $overall_att$overall.att. These should be unified
+  # so that both result objects expose the same field names. See dev/NOTES.md.
+  skip("pte_emp_boot and pte_results have inconsistent field names for overall ATT")
   sp <- did::reset.sim()
   data <- did::build_sim_dataset(sp)
 
@@ -61,16 +120,21 @@ test_that("empirical bootstrap", {
       xformula = ~X,
       boot_type = "empirical",
       biters = 10
-    ) # just checking that this runs
+    )
   )
 
-  expect_equal(res$overall_att$overall.att, 1)
-  message("this is failing because the names are not correct on the returns
-          for the empirical bootstrap case")
+  # When field names are unified, both paths should expose $overall_att$overall.att
+  expect_equal(res$overall_att$overall.att, 1, tolerance = 0.5)
 })
 
 test_that("periods that look like years works ok and unbalanced groups", {
-  skip("not sure what this is")
+  # Tests two edge cases:
+  # 1. Year-like time periods (non-consecutive integers e.g. 2003/2004/2006/2007)
+  #    that get remapped internally via orig2t/t2orig.
+  # 2. A data column literally named "G" (matching ptetools' internal column name),
+  #    which can cause masking bugs if setup_pte does not rename carefully.
+  # Skipped pending verification of hardcoded expected values. See dev/NOTES.md.
+  skip("expected values need verification; see dev/NOTES.md for context")
   data(mpdta)
   res <- suppressWarnings(
     pte(

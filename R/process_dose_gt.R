@@ -22,22 +22,22 @@ process_dose_gt <- function(gt_results, ptep, ...) {
 
     # main dose-specific results are in extra_gt_returns
     all_extra_gt_returns <- att_gt$extra_gt_returns
-    groups <- unlist(BMisc::getListElement(all_extra_gt_returns, "group"))
-    time.periods <- unlist(BMisc::getListElement(all_extra_gt_returns, "time.period"))
+    groups <- unlist(BMisc::get_list_element(all_extra_gt_returns, "group"))
+    time.periods <- unlist(BMisc::get_list_element(all_extra_gt_returns, "time.period"))
 
     # check that order of groups and time periods matches
     if (!all(cbind(groups, time.periods) == o_weights[, c("group", "time.period")])) {
         stop("in processing dose results, mismatch between order of groups and time periods")
     }
 
-    inner_extra_gt_returns <- BMisc::getListElement(all_extra_gt_returns, "extra_gt_returns")
-    att.d_gt <- BMisc::getListElement(inner_extra_gt_returns, "att.d")
-    acrt.d_gt <- BMisc::getListElement(inner_extra_gt_returns, "acrt.d")
-    att.overall_gt <- unlist(BMisc::getListElement(inner_extra_gt_returns, "att.overall"))
-    acrt.overall_gt <- unlist(BMisc::getListElement(inner_extra_gt_returns, "acrt.overall"))
-    bet_gt <- BMisc::getListElement(inner_extra_gt_returns, "bet")
-    bread_gt <- BMisc::getListElement(inner_extra_gt_returns, "bread")
-    Xe_gt <- BMisc::getListElement(inner_extra_gt_returns, "Xe")
+    inner_extra_gt_returns <- BMisc::get_list_element(all_extra_gt_returns, "extra_gt_returns")
+    att.d_gt <- BMisc::get_list_element(inner_extra_gt_returns, "att.d")
+    acrt.d_gt <- BMisc::get_list_element(inner_extra_gt_returns, "acrt.d")
+    att.overall_gt <- unlist(BMisc::get_list_element(inner_extra_gt_returns, "att.overall"))
+    acrt.overall_gt <- unlist(BMisc::get_list_element(inner_extra_gt_returns, "acrt.overall"))
+    bet_gt <- BMisc::get_list_element(inner_extra_gt_returns, "bet")
+    bread_gt <- BMisc::get_list_element(inner_extra_gt_returns, "bread")
+    Xe_gt <- BMisc::get_list_element(inner_extra_gt_returns, "Xe")
 
     acrt_gt_inffunc_mat <- gt_results$inffunc
     biters <- ptep$biters
@@ -74,7 +74,6 @@ process_dose_gt <- function(gt_results, ptep, ...) {
     overall_acrt_inffunc <- as.matrix(rowSums(sweep(acrt_gt_inffunc_mat, 2, o_weights$overall_weight, "*")) / sum(o_weights$overall_weight))
     overall_acrt_se <- getSE(overall_acrt_inffunc, biters = biters, alp = alp)
 
-
     # point estimates of ATT(d) and ACRT(d)
     att.d <- BMisc::weighted_combine_list(att.d_gt, o_weights$overall_weight)
     acrt.d <- BMisc::weighted_combine_list(acrt.d_gt, o_weights$overall_weight)
@@ -92,7 +91,16 @@ process_dose_gt <- function(gt_results, ptep, ...) {
     # estimating the \beta's
     n1_vec <- sapply(Xe_gt, nrow)
     n <- nrow(acrt_gt_inffunc_mat)
+    # these are treated observations
     keep_mat <- acrt_gt_inffunc_mat != 0
+    # these are both treated and control observations
+    keep_mat2 <- overall_att_res$att_gt$inffunc != 0
+    # these keep track of untreated comparison units
+    keep_mat2 <- keep_mat2 & !keep_mat
+    #
+    comparison_inffunc <- overall_att_res$att_gt$inffunc
+    comparison_inffunc[!keep_mat2] <- 0
+    n0_vec <- colSums(keep_mat2)
     if (!all(colSums(keep_mat) == n1_vec)) {
         stop("something off with overall influence function")
     }
@@ -103,6 +111,11 @@ process_dose_gt <- function(gt_results, ptep, ...) {
             out_inffunc <- matrix(data = 0, nrow = n, ncol = length(dvals))
             this_inffunc <- (Xe_gt[[i]] %*% bread_gt[[i]] %*% t(bs_grid))
             out_inffunc[keep_mat[, i], ] <- (n / n1_vec[i]) * this_inffunc
+            # add comparison group part of the influence function
+            # every d is the same with respect to comparison group
+            # don't rescale the influence function for untreated because these
+            # were already rescaled in the call to pte_default above
+            out_inffunc[keep_mat2[, i], ] <- -replicate(n = ncol(out_inffunc), comparison_inffunc[keep_mat2[, i], i])
             out_inffunc
         }
     )
@@ -340,59 +353,4 @@ print.summary.dose_obj <- function(x, ...) {
     cat("---\n")
     cat("Signif. codes: `*' confidence band does not cover 0")
     cat("\n\n")
-
-    # note to self: commented out code that reported results at each value of the dose
-    # # ATT(d)
-    # cat("ATT(d):\n")
-
-    # cband_text1a <- paste0(100 * (1 - alp), "% ")
-    # cband_text1b <- ifelse(bstrap,
-    #     ifelse(cband, "Simult. ", "Pointwise "),
-    #     "Pointwise "
-    # )
-    # cband_text1 <- paste0("[", cband_text1a, cband_text1b)
-
-    # cband_lower <- x$att.d - x$att.d_crit.val * x$att.d_se
-    # cband_upper <- x$att.d + x$att.d_crit.val * x$att.d_se
-
-    # sig <- (cband_upper < 0) | (cband_lower > 0)
-    # sig[is.na(sig)] <- FALSE
-    # sig_text <- ifelse(sig, "*", "")
-
-    # out <- cbind.data.frame(x$dose, x$att.d, x$att.d_se, cband_lower, cband_upper)
-    # out <- round(out, 4)
-    # out <- cbind.data.frame(out, sig_text)
-
-
-    # colnames(out) <- c("dose", "ATT(d)", "Std. Error", cband_text1, "Conf. Band]", "")
-    # print(out, row.names = FALSE, justify = "centre")
-    # cat("\n\n")
-
-    # # ATT(d)
-    # cat("ACRT(d):\n")
-
-    # cband_text1a <- paste0(100 * (1 - alp), "% ")
-    # cband_text1b <- ifelse(bstrap,
-    #     ifelse(cband, "Simult. ", "Pointwise "),
-    #     "Pointwise "
-    # )
-    # cband_text1 <- paste0("[", cband_text1a, cband_text1b)
-
-    # cband_lower <- x$acrt.d - x$acrt.d_crit.val * x$acrt.d_se
-    # cband_upper <- x$acrt.d + x$acrt.d_crit.val * x$acrt.d_se
-
-    # sig <- (cband_upper < 0) | (cband_lower > 0)
-    # sig[is.na(sig)] <- FALSE
-    # sig_text <- ifelse(sig, "*", "")
-
-    # out <- cbind.data.frame(x$dose, x$acrt.d, x$acrt.d_se, cband_lower, cband_upper)
-    # out <- round(out, 4)
-    # out <- cbind.data.frame(out, sig_text)
-
-
-    # colnames(out) <- c("dose", "ACRT(d)", "Std. Error", cband_text1, "Conf. Band]", "")
-    # print(out, row.names = FALSE, justify = "centre")
-    # cat("---\n")
-    # cat("Signif. codes: `*' confidence band does not cover 0")
-    # cat("\n\n")
 }

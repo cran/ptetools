@@ -1,3 +1,13 @@
+# =============================================================================
+# Title: ptetools S3 Classes
+# Description: S3 class constructors and print/summary methods for all major
+#   result types: group_time_att, pte_results, pte_emp_boot, pte_qtt,
+#   pte_dose_results, attgt_if, attgt_noif, gt_data_frame.
+# Author: Brant Callaway
+# Last update: 2026-05-18
+# Date created: 2021-05-17
+# =============================================================================
+
 #' @title Class for Estimates across Groups and Time
 #'
 #' @description Class that holds causal effect parameter estimates across
@@ -59,7 +69,7 @@ group_time_att <- function(group,
   # might eventually drop this, but add a few things to get access
   # to aggregations from did package
   out$DIDparams <- out$ptep
-  out$DIDparams$panel <- TRUE
+  out$DIDparams$panel <- out$ptep$panel
   out$DIDparams$data$w <- 1
   out$c <- out$crit_val
   out$inffunc <- out$inf_func
@@ -196,13 +206,9 @@ summary.pte_results <- function(object, ...) {
 
   # Event study
   # header
-  bstrap <- object$DIDparams$bstrap
-  cband <- object$DIDparams$cband
+  cband <- isTRUE(object$ptep$cband)
   cband_text1a <- paste0(100 * (1 - alp), "% ")
-  cband_text1b <- ifelse(bstrap,
-    ifelse(cband, "Simult. ", "Pointwise "),
-    "Pointwise "
-  )
+  cband_text1b <- ifelse(cband, "Simult. ", "Pointwise ")
   cband_text1 <- paste0("[", cband_text1a, cband_text1b)
 
   cband_lower <- event_study$att.egt - event_study$crit.val.egt * event_study$se.egt
@@ -225,7 +231,6 @@ summary.pte_results <- function(object, ...) {
     overall_att = out1,
     event_study = out2,
     alp = alp,
-    bstrap = bstrap,
     cband = cband,
     target_parameter = target_parameter
   )
@@ -246,8 +251,7 @@ summary.pte_results <- function(object, ...) {
 #' @return None. Prints a summary of the \code{pte_results} object
 #' @export
 print.pte_results <- function(x, ...) {
-  # summary.pte_results(x,...)
-  NextMethod(x)
+  print(summary(x, ...), ...)
   invisible(x)
 }
 
@@ -380,6 +384,8 @@ gt_data_frame <- function(data) {
 #' @param group_weights list containing weights on underlying ATT(g,t)
 #'  corresponding to deliver averaged group-specific treatment effects
 #'
+#' @param ptep \code{pte_params} object, stored for reference in the result.
+#'
 #' @inheritParams attgt_if
 #'
 #' @return a `pte_emp_boot` object
@@ -392,7 +398,8 @@ pte_emp_boot <- function(attgt_results,
                          overall_weights = NULL,
                          dyn_weights = NULL,
                          group_weights = NULL,
-                         extra_gt_returns = NULL) {
+                         extra_gt_returns = NULL,
+                         ptep = NULL) {
   out <- list(
     attgt_results = attgt_results,
     overall_results = overall_results,
@@ -401,7 +408,8 @@ pte_emp_boot <- function(attgt_results,
     overall_weights = overall_weights,
     dyn_weights = dyn_weights,
     group_weights = group_weights,
-    extra_gt_returns = extra_gt_returns
+    extra_gt_returns = extra_gt_returns,
+    ptep = ptep
   )
 
   class(out) <- "pte_emp_boot"
@@ -421,19 +429,19 @@ pte_emp_boot <- function(attgt_results,
 #' @keywords internal
 #' @export
 summary.pte_emp_boot <- function(object, ...) {
-  overall_att <- object$overall_results$att
-  overall_se <- object$overall_results$se
+  overall_att  <- object$overall_results$att
+  overall_se   <- object$overall_results$se
+  overall_cval <- object$overall_results$crit_val
 
-  # event_study <- object$event_study
   event_study_att <- object$dyn_results$att.e
-  event_study_se <- object$dyn_results$se
-  event_study_e <- object$dyn_results$e
+  event_study_se  <- object$dyn_results$se
+  event_study_e   <- object$dyn_results$e
 
-  # overall estimates
-  alp <- .05 # hard coded
+  alp <- if (!is.null(object$ptep$alp)) object$ptep$alp else 0.05
   pointwise_cval <- qnorm(1 - alp / 2)
-  overall_cband_upper <- overall_att + pointwise_cval * overall_se
-  overall_cband_lower <- overall_att - pointwise_cval * overall_se
+  use_cval <- if (!is.null(overall_cval)) overall_cval else pointwise_cval
+  overall_cband_upper <- overall_att + use_cval * overall_se
+  overall_cband_lower <- overall_att - use_cval * overall_se
   out1 <- cbind.data.frame(overall_att, overall_se, overall_cband_lower, overall_cband_upper)
   out1 <- round(out1, 4)
   overall_sig <- (overall_cband_upper < 0) | (overall_cband_lower > 0)
@@ -442,15 +450,10 @@ summary.pte_emp_boot <- function(object, ...) {
   out1 <- cbind.data.frame(out1, overall_sig_text)
 
 
-  # Event study
-  # header
-  bstrap <- TRUE
-  cband <- FALSE
+  # Event study header
+  cband <- isTRUE(object$ptep$cband)
   cband_text1a <- paste0(100 * (1 - alp), "% ")
-  cband_text1b <- ifelse(bstrap,
-    ifelse(cband, "Simult. ", "Pointwise "),
-    "Pointwise "
-  )
+  cband_text1b <- ifelse(cband, "Simult. ", "Pointwise ")
   cband_text1 <- paste0("[", cband_text1a, cband_text1b)
 
   cband_lower <- event_study_att - pointwise_cval * event_study_se
@@ -471,13 +474,91 @@ summary.pte_emp_boot <- function(object, ...) {
     overall_att = out1,
     event_study = out2,
     alp = alp,
-    bstrap = bstrap,
     cband = cband
   )
 
   class(out) <- "summary.pte_results"
 
   out
+}
+
+
+#' @title Class for QTT Curve Results
+#'
+#' @description Holds the full quantile treatment effect (QTT) curve at the
+#'  overall, group-specific, and dynamic (event-study) aggregation levels.
+#'  Each aggregation contains estimates at all quantile levels in \code{probs}
+#'  together with bootstrap standard errors and pointwise confidence intervals.
+#'
+#' @param overall data.frame with columns \code{probs}, \code{qtt}, \code{se},
+#'  \code{lower_pw}, \code{upper_pw}, \code{lower_ub}, \code{upper_ub}
+#' @param dynamic data.frame with columns \code{e}, \code{probs}, \code{qtt},
+#'  \code{se}, \code{lower_pw}, \code{upper_pw}, \code{lower_ub}, \code{upper_ub}
+#' @param group data.frame with columns \code{group}, \code{probs}, \code{qtt},
+#'  \code{se}, \code{lower_pw}, \code{upper_pw}, \code{lower_ub}, \code{upper_ub}
+#' @param F0_overall mixture CDF of untreated potential outcomes
+#' @param F1_overall mixture CDF of treated potential outcomes
+#' @param ptep \code{pte_params} object
+#'
+#' @return a \code{pte_qtt} object
+#'
+#' @export
+pte_qtt <- function(overall,
+                    dynamic,
+                    group,
+                    F0_overall = NULL, # nolint: object_name_linter
+                    F1_overall = NULL, # nolint: object_name_linter
+                    ptep) {
+  out <- list(
+    overall    = overall,
+    dynamic    = dynamic,
+    group      = group,
+    F0_overall = F0_overall, # nolint: object_name_linter
+    F1_overall = F1_overall, # nolint: object_name_linter
+    ptep       = ptep
+  )
+  class(out) <- "pte_qtt"
+  out
+}
+
+
+#' @title summary.pte_qtt
+#'
+#' @description Summary for \code{pte_qtt} object; prints the overall QTT curve.
+#'
+#' @param object a \code{pte_qtt} object
+#' @param ... additional arguments
+#'
+#' @keywords internal
+#' @return None. Prints the overall QTT curve.
+#' @export
+summary.pte_qtt <- function(object, ...) {
+  alp <- object$ptep$alp
+
+  cat("\nOverall QTT Curve:\n")
+  out <- object$overall[, c("probs", "qtt", "se", "lower_ub", "upper_ub")]
+  out <- round(out, 4)
+  colnames(out) <- c("Quantile", "QTT", "Std. Error",
+                     paste0(100 * (1 - alp), "% CB Lower"),
+                     paste0(100 * (1 - alp), "% CB Upper"))
+  print(out, row.names = FALSE)
+  cat("\n")
+  invisible(object)
+}
+
+
+#' @title print.pte_qtt
+#'
+#' @description Prints a \code{pte_qtt} object.
+#'
+#' @param x a \code{pte_qtt} object
+#' @param ... extra arguments
+#'
+#' @keywords internal
+#' @return None. Prints the overall QTT curve.
+#' @export
+print.pte_qtt <- function(x, ...) {
+  summary.pte_qtt(x, ...)
 }
 
 

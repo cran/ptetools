@@ -1,3 +1,13 @@
+# =============================================================================
+# Title: Empirical Bootstrap for Panel Treatment Effects
+# Description: panel_empirical_bootstrap and qtt_empirical_bootstrap (bootstrap
+#   SE routines), plus aggregation functions attgt_pte_aggregations,
+#   qtt_pte_aggregations, and qott_pte_aggregations.
+# Author: Brant Callaway
+# Last update: 2026-05-18
+# Date created: 2021-05-19
+# =============================================================================
+
 #' @title Panel Empirical Bootstrap
 #'
 #' @description Computes empirical bootstrap pointwise standard errors
@@ -6,6 +16,9 @@
 #' @inheritParams pte
 #' @inheritParams attgt_if
 #' @param attgt.list list of attgt results from \code{compute.pte}
+#' @param aggte_fun An optional function for aggregating group-time
+#'  treatment effects.  When \code{NULL} (the default), the function is
+#'  selected automatically based on \code{gt_type}.
 #'
 #' @return \code{pte_emp_boot} object
 #'
@@ -16,7 +29,38 @@ panel_empirical_bootstrap <- function(attgt.list,
                                       subset_fun,
                                       attgt_fun,
                                       extra_gt_returns,
+                                      aggte_fun = NULL,
                                       ...) {
+  # Resolve aggte_fun; warn if caller did not supply one (deprecated path).
+  # Resolution happens before the QTT dispatch so the resolved value flows through.
+  if (is.null(aggte_fun)) {
+    warning(
+      "aggte_fun not specified; defaulting based on gt_type. ",
+      "This default will be removed in a future version of ptetools.",
+      call. = FALSE
+    )
+    gt_type_inner <- ptep$gt_type
+    aggte_fun <- switch(gt_type_inner,
+      qtt  = qtt_pte_aggregations,
+      qott = qott_pte_aggregations,
+      function(al, p, eg) attgt_pte_aggregations(al, p)
+    )
+  }
+
+  # full QTT curve mode: dispatch to dedicated bootstrap function
+  if (ptep$gt_type == "qtt") {
+    return(qtt_empirical_bootstrap(
+      attgt.list       = attgt.list,
+      ptep             = ptep,
+      setup_pte_fun    = setup_pte_fun,
+      subset_fun       = subset_fun,
+      attgt_fun        = attgt_fun,
+      extra_gt_returns = extra_gt_returns,
+      aggte_fun        = aggte_fun,
+      ...
+    ))
+  }
+
   # unpack ptep
   data <- ptep$data
   idname <- ptep$idname
@@ -30,14 +74,7 @@ panel_empirical_bootstrap <- function(attgt.list,
   # compute aggregations
   #-----------------------------------------------------------------------------
 
-  # all results that return QTTs will go through empirical bootstrap code
-  if (gt_type == "qtt") {
-    aggte <- qtt_pte_aggregations(attgt.list, ptep, extra_gt_returns)
-  } else if (gt_type == "qott") {
-    aggte <- qott_pte_aggregations(attgt.list, ptep, extra_gt_returns)
-  } else {
-    aggte <- attgt_pte_aggregations(attgt.list, ptep)
-  }
+  aggte <- aggte_fun(attgt.list, ptep, extra_gt_returns)
 
   # kind of hack...calls and returns of emprical and multiplier bootstrap
   # not matching exactly
@@ -57,8 +94,15 @@ panel_empirical_bootstrap <- function(attgt.list,
 
   # loop for each nonparametric bootstrap iteration
   boot.res <- pbapply::pblapply(1:biters, function(b) {
-    # draw a bootstrap sample; here, we'll call an outside function
-    bdata <- BMisc::blockBootSample(data, idname)
+    # draw a bootstrap sample; panel data are resampled by unit while repeated
+    # cross sections are resampled at the observation level
+    if (isTRUE(ptep$panel)) {
+      bdata <- BMisc::blockBootSample(data, idname)
+    } else {
+      bdata <- data[sample(seq_len(nrow(data)), replace = TRUE), ]
+      bdata$.rowid <- seq_len(nrow(bdata))
+      bdata$id <- bdata$.rowid
+    }
 
     bptep <- setup_pte_fun(
       yname = ptep$yname,
@@ -66,6 +110,7 @@ panel_empirical_bootstrap <- function(attgt.list,
       tname = ptep$tname,
       idname = ptep$idname,
       data = bdata,
+      panel = ptep$panel,
       alp = ptep$alp,
       boot_type = boot_type,
       gt_type = gt_type,
@@ -74,8 +119,6 @@ panel_empirical_bootstrap <- function(attgt.list,
       cl = ptep$cl,
       ...
     )
-    # bptep <- ptep
-    # bptep$data <- bdata
 
     # call our function for estimating attgt on the
     # bootstrapped data
@@ -86,28 +129,21 @@ panel_empirical_bootstrap <- function(attgt.list,
       ...
     )[c("attgt.list", "extra_gt_returns")] # don't need to carry around ptep
 
-    if (gt_type == "qtt") {
-      bres <- qtt_pte_aggregations(bres_gt$attgt.list, bptep, bres_gt$extra_gt_returns)
-    } else if (gt_type == "qott") {
-      bres <- qott_pte_aggregations(bres_gt$attgt.list, bptep, bres_gt$extra_gt_returns)
-    } else {
-      bres <- attgt_pte_aggregations(bres_gt$attgt.list, bptep)
-    }
-
+    bres <- aggte_fun(bres_gt$attgt.list, bptep, bres_gt$extra_gt_returns)
     bres
   }, cl = cl)
 
   # attgt results
-  attgt_results_inner <- bind_rows(BMisc::getListElement(boot.res, "attgt_results")) %>%
+  attgt_results_inner <- bind_rows(BMisc::get_list_element(boot.res, "attgt_results")) |>
     group_by(group, time.period)
-  attgt_results_se <- unlist(attgt_results_inner %>%
+  attgt_results_se <- unlist(attgt_results_inner |>
     group_map(~ sd(.x$att)))
   attgt_results <- aggte$attgt_results
   attgt_results$se <- attgt_results_se
 
   # dynamic results
-  dyn_results_inner <- bind_rows(BMisc::getListElement(boot.res, "dyn_results")) %>%
-    group_by(e) %>%
+  dyn_results_inner <- bind_rows(BMisc::get_list_element(boot.res, "dyn_results")) |>
+    group_by(e) |>
     mutate(length.e = length(e))
   original_elength <- length(unique(dyn_results_inner$e))
   dyn_results_inner <- subset(dyn_results_inner, length.e == biters)
@@ -116,7 +152,7 @@ panel_empirical_bootstrap <- function(attgt.list,
     warning("dropping some event times due to small groups")
   }
 
-  dyn_results_se <- dyn_results_inner %>%
+  dyn_results_se <- dyn_results_inner |>
     transmute(se = sd(att.e))
   dyn_results_se <- dyn_results_se[1:new_elength, ]
 
@@ -125,8 +161,8 @@ panel_empirical_bootstrap <- function(attgt.list,
 
   # group results
   group_results <- aggte$group_results
-  group_results_inner <- bind_rows(BMisc::getListElement(boot.res, "group_results")) %>%
-    group_by(group) %>%
+  group_results_inner <- bind_rows(BMisc::get_list_element(boot.res, "group_results")) |>
+    group_by(group) |>
     mutate(length.group = length(group))
   original_glength <- length(unique(group_results_inner$group))
   group_results_inner <- subset(group_results_inner, length.group == biters)
@@ -135,16 +171,21 @@ panel_empirical_bootstrap <- function(attgt.list,
     warning("dropping some groups due to small groups")
   }
 
-  group_results_se <- group_results_inner %>%
+  group_results_se <- group_results_inner |>
     transmute(se = sd(att.g))
   group_results_se <- group_results_se[1:new_glength, ]
 
   group_results <- inner_join(group_results, group_results_se, by = "group")
 
   # overall results
-  overall_results <- aggte$overall_results
-  overall_results_se <- sd(unlist(BMisc::getListElement(boot.res, "overall_results")))
-  overall_results <- tibble(att = overall_results, se = overall_results_se)
+  alp <- ptep$alp
+  overall_att    <- aggte$overall_results
+  overall_draws  <- unlist(BMisc::get_list_element(boot.res, "overall_results"))
+  overall_se     <- sd(overall_draws)
+  overall_cval   <- quantile(abs((overall_draws - overall_att) / overall_se),
+                             1 - alp, type = 1)
+  overall_results <- data.frame(att = overall_att, se = overall_se,
+                                crit_val = overall_cval)
 
 
   # return all results
@@ -153,7 +194,8 @@ panel_empirical_bootstrap <- function(attgt.list,
     overall_results = overall_results,
     group_results = group_results,
     dyn_results = dyn_results,
-    extra_gt_returns = extra_gt_returns
+    extra_gt_returns = extra_gt_returns,
+    ptep = ptep
   )
 }
 
@@ -305,83 +347,245 @@ attgt_pte_aggregations <- function(attgt.list, ptep) {
 
 #' @title Aggregate Group-Time Quantile Treatment Effects
 #'
-#' @description Aggregate group-time distributions into qtt versions of
-#'  overall, group, and dynamic effects.
+#' @description Aggregate group-time F0/F1 distributions into QTT curves at
+#'  the overall, group, and dynamic level.  CDFs are mixed first using
+#'  \code{BMisc::combine_ecdfs} and then inverted at all quantile levels in
+#'  \code{probs}, avoiding the bias from averaging scalar QTTs.
 #'
 #' @inheritParams attgt_pte_aggregations
 #' @inheritParams attgt_if
 #'
-#' @return \code{pte_emp_boot} object
+#' @return named list with elements \code{overall_results},
+#'  \code{dyn_results}, \code{group_results}, \code{F0_overall},
+#'  \code{F1_overall}
 #'
 #' @export
 qtt_pte_aggregations <- function(attgt.list, ptep, extra_gt_returns) {
-  ret_quantile <- ptep$ret_quantile
+  probs <- if (is.null(ptep$probs)) seq(0.05, 0.95, 0.05) else ptep$probs
 
-  # compute results for att_gt, but we are actually just interested in getting
-  # the weights here.
+  # get (g,t) aggregation weights
   attgt_res <- attgt_pte_aggregations(attgt.list, ptep = ptep)
-  F0_gt <- lapply(extra_gt_returns, function(egr) egr$extra_gt_returns$F0)
-  F1_gt <- lapply(extra_gt_returns, function(egr) egr$extra_gt_returns$F1)
-  qtt_gt <- unlist(lapply(1:length(F0_gt), function(j) {
-    quantile(F1_gt[[j]], probs = ret_quantile, type = 1) - quantile(F0_gt[[j]], probs = ret_quantile, type = 1)
-  }))
-  groups <- unlist(BMisc::getListElement(attgt.list, "group"))
-  time.periods <- unlist(BMisc::getListElement(attgt.list, "time.period"))
+
+  F0_gt <- lapply(extra_gt_returns, function(egr) egr$extra_gt_returns$F0) # nolint: object_name_linter
+  F1_gt <- lapply(extra_gt_returns, function(egr) egr$extra_gt_returns$F1) # nolint: object_name_linter
+
   yname <- ptep$yname
   y.seq <- quantile(ptep$data[, yname], probs = seq(0, 1, length.out = 1000))
 
-  F0_overall <- BMisc::combineDfs(
-    y.seq = y.seq,
-    dflist = F0_gt,
-    pstrat = attgt_res$overall_weights
+  # --- overall -----------------------------------------------------------
+  F0_overall <- BMisc::combine_ecdfs( # nolint: object_name_linter
+    y.seq = y.seq, ecdflist = F0_gt, weights = attgt_res$overall_weights
   )
-  F1_overall <- BMisc::combineDfs(
-    y.seq = y.seq,
-    dflist = F1_gt,
-    pstrat = attgt_res$overall_weights
+  F1_overall <- BMisc::combine_ecdfs( # nolint: object_name_linter
+    y.seq = y.seq, ecdflist = F1_gt, weights = attgt_res$overall_weights
   )
-  overall_qtt <- quantile(F1_overall, probs = ret_quantile, type = 1) - quantile(F0_overall, probs = ret_quantile, type = 1)
+  overall_qtt <- quantile(F1_overall, probs = probs, type = 1) -
+    quantile(F0_overall, probs = probs, type = 1)
+  overall_results <- data.frame(probs = probs, qtt = overall_qtt)
 
-  dyn_qtt <- lapply(attgt_res$dyn_weights, function(dw) {
-    F0_e <- BMisc::combineDfs(
-      y.seq = y.seq,
-      dflist = F0_gt,
-      pstrat = dw$weights
+  # --- dynamic -----------------------------------------------------------
+  dyn_results_list <- lapply(attgt_res$dyn_weights, function(dw) {
+    F0_e <- BMisc::combine_ecdfs( # nolint: object_name_linter
+      y.seq = y.seq, ecdflist = F0_gt, weights = dw$weights
     )
-    F1_e <- BMisc::combineDfs(
-      y.seq = y.seq,
-      dflist = F1_gt,
-      pstrat = dw$weights
+    F1_e <- BMisc::combine_ecdfs( # nolint: object_name_linter
+      y.seq = y.seq, ecdflist = F1_gt, weights = dw$weights
     )
-    list(e = dw$e, att.e = quantile(F1_e, probs = ret_quantile, type = 1) - quantile(F0_e, probs = ret_quantile, type = 1))
+    qtt_e <- quantile(F1_e, probs = probs, type = 1) -
+      quantile(F0_e, probs = probs, type = 1)
+    data.frame(e = dw$e, probs = probs, qtt = qtt_e)
   })
+  dyn_results <- do.call(rbind, dyn_results_list)
 
-  group_qtt <- lapply(attgt_res$group_weights, function(gw) {
-    F0_g <- BMisc::combineDfs(
-      y.seq = y.seq,
-      dflist = F0_gt,
-      pstrat = gw$weights
+  # --- group -------------------------------------------------------------
+  group_results_list <- lapply(attgt_res$group_weights, function(gw) {
+    F0_g <- BMisc::combine_ecdfs( # nolint: object_name_linter
+      y.seq = y.seq, ecdflist = F0_gt, weights = gw$weights
     )
-    F1_g <- BMisc::combineDfs(
-      y.seq = y.seq,
-      dflist = F1_gt,
-      pstrat = gw$weights
+    F1_g <- BMisc::combine_ecdfs( # nolint: object_name_linter
+      y.seq = y.seq, ecdflist = F1_gt, weights = gw$weights
     )
-    list(group = gw$g, att.g = quantile(F1_g, probs = ret_quantile, type = 1) - quantile(F0_g, probs = ret_quantile, type = 1))
+    qtt_g <- quantile(F1_g, probs = probs, type = 1) -
+      quantile(F0_g, probs = probs, type = 1)
+    data.frame(group = gw$g, probs = probs, qtt = qtt_g)
   })
+  group_results <- do.call(rbind, group_results_list)
 
-  pte_emp_boot(
-    attgt_results = data.frame(
-      group = groups,
-      time.period = time.periods,
-      att = qtt_gt
-    ),
-    dyn_results = do.call(rbind.data.frame, dyn_qtt),
-    group_results = do.call(rbind.data.frame, group_qtt),
-    overall_results = overall_qtt
+  list(
+    overall_results = overall_results,
+    dyn_results     = dyn_results,
+    group_results   = group_results,
+    F0_overall      = F0_overall, # nolint: object_name_linter
+    F1_overall      = F1_overall  # nolint: object_name_linter
   )
 }
 
+
+
+#' @title Empirical Bootstrap for QTT Curves
+#'
+#' @description Runs the empirical bootstrap for the full QTT curve case
+#'  (\code{gt_type = "qtt"}).  Called automatically by
+#'  \code{panel_empirical_bootstrap} when \code{gt_type == "qtt"}.
+#'
+#' @inheritParams panel_empirical_bootstrap
+#'
+#' @return \code{pte_qtt} object
+#'
+#' @export
+qtt_empirical_bootstrap <- function(attgt.list,
+                                    ptep,
+                                    setup_pte_fun,
+                                    subset_fun,
+                                    attgt_fun,
+                                    extra_gt_returns,
+                                    aggte_fun = NULL,
+                                    ...) {
+  # When called directly (not via panel_empirical_bootstrap), resolve NULL.
+  if (is.null(aggte_fun)) {
+    warning(
+      "aggte_fun not specified; defaulting to qtt_pte_aggregations. ",
+      "This default will be removed in a future version of ptetools.",
+      call. = FALSE
+    )
+    aggte_fun <- qtt_pte_aggregations
+  }
+
+  probs  <- if (is.null(ptep$probs)) seq(0.05, 0.95, 0.05) else ptep$probs
+  data   <- ptep$data
+  biters <- ptep$biters
+
+  # point estimates
+  aggte <- aggte_fun(attgt.list, ptep, extra_gt_returns)
+
+  # bootstrap
+  boot.res <- pbapply::pblapply(seq_len(biters), function(b) {
+    if (isTRUE(ptep$panel)) {
+      bdata <- BMisc::blockBootSample(data, ptep$idname)
+    } else {
+      bdata <- data[sample(seq_len(nrow(data)), replace = TRUE), ]
+      bdata$.rowid <- seq_len(nrow(bdata))
+      bdata$id     <- bdata$.rowid
+    }
+
+    bptep <- setup_pte_fun(
+      yname     = ptep$yname,
+      gname     = ptep$gname,
+      tname     = ptep$tname,
+      idname    = ptep$idname,
+      data      = bdata,
+      panel     = ptep$panel,
+      alp       = ptep$alp,
+      boot_type = ptep$boot_type,
+      gt_type   = ptep$gt_type,
+      probs     = ptep$probs,
+      biters    = ptep$biters,
+      cl        = ptep$cl,
+      ...
+    )
+
+    bres_gt <- compute.pte(
+      ptep       = bptep,
+      subset_fun = subset_fun,
+      attgt_fun  = attgt_fun,
+      ...
+    )[c("attgt.list", "extra_gt_returns")]
+
+    aggte_fun(bres_gt$attgt.list, bptep, bres_gt$extra_gt_returns)
+  }, cl = ptep$cl)
+
+  alp <- ptep$alp
+  z   <- qnorm(1 - alp / 2)
+
+  # Compute uniform critical value from a bootstrap matrix and point estimates.
+  # Uses IQR-based scale (more robust when some QTTs are near zero), following
+  # the same approach as computeSE() in the qte package. Returns a scalar c
+  # such that qtt +/- c * se gives a simultaneous band across quantiles.
+  # Both pointwise and uniform CIs are always computed; cband is a plotting
+  # choice, not a computation choice.
+  qtt_crit_val <- function(boot_mat, qtt_est) {
+    sigmahalf <- (apply(boot_mat, 2, function(b) quantile(b, 0.75, type = 1)) -
+                  apply(boot_mat, 2, function(b) quantile(b, 0.25, type = 1))) /
+                 (qnorm(0.75) - qnorm(0.25))
+    if (any(sigmahalf == 0)) {
+      sigmahalf <- pmax(apply(boot_mat, 2, sd), 1e-9)
+    }
+    cb <- apply(boot_mat, 1, function(q) max(abs((q - qtt_est) / sigmahalf)))
+    as.numeric(quantile(cb, 1 - alp, type = 1))
+  }
+
+  # --- overall SE --------------------------------------------------------
+  overall_boot_mat <- do.call(rbind, lapply(boot.res, function(br) br$overall_results$qtt))
+  overall_se   <- apply(overall_boot_mat, 2, sd)
+  overall_cval <- qtt_crit_val(overall_boot_mat, aggte$overall_results$qtt)
+  overall_results           <- aggte$overall_results
+  overall_results$se        <- overall_se
+  overall_results$lower_pw  <- overall_results$qtt - z            * overall_se
+  overall_results$upper_pw  <- overall_results$qtt + z            * overall_se
+  overall_results$lower_ub  <- overall_results$qtt - overall_cval * overall_se
+  overall_results$upper_ub  <- overall_results$qtt + overall_cval * overall_se
+
+  # --- dynamic SE --------------------------------------------------------
+  dyn_e_vals <- unique(aggte$dyn_results$e)
+  dyn_se_list <- lapply(dyn_e_vals, function(this_e) {
+    boot_rows <- lapply(boot.res, function(br) {
+      vals <- br$dyn_results$qtt[br$dyn_results$e == this_e]
+      if (length(vals) != length(probs)) NULL else vals
+    })
+    n_complete <- sum(!sapply(boot_rows, is.null))
+    if (n_complete < 2) {
+      warning(paste0("dropping event time ", this_e, " from dynamic QTT (small groups)"))
+      return(NULL)
+    }
+    boot_mat  <- do.call(rbind, Filter(Negate(is.null), boot_rows))
+    qtt_est   <- aggte$dyn_results$qtt[aggte$dyn_results$e == this_e]
+    this_cval <- qtt_crit_val(boot_mat, qtt_est)
+    data.frame(e = this_e, probs = probs, se = unname(apply(boot_mat, 2, sd)),
+               cval = this_cval)
+  })
+  dyn_se_df   <- do.call(rbind, Filter(Negate(is.null), dyn_se_list))
+  dyn_results <- merge(aggte$dyn_results, dyn_se_df, by = c("e", "probs"), all.x = FALSE)
+  dyn_results$lower_pw <- dyn_results$qtt - z                  * dyn_results$se
+  dyn_results$upper_pw <- dyn_results$qtt + z                  * dyn_results$se
+  dyn_results$lower_ub <- dyn_results$qtt - dyn_results$cval   * dyn_results$se
+  dyn_results$upper_ub <- dyn_results$qtt + dyn_results$cval   * dyn_results$se
+  dyn_results$cval     <- NULL
+
+  # --- group SE ----------------------------------------------------------
+  group_vals <- unique(aggte$group_results$group)
+  group_se_list <- lapply(group_vals, function(this_g) {
+    boot_rows <- lapply(boot.res, function(br) {
+      vals <- br$group_results$qtt[br$group_results$group == this_g]
+      if (length(vals) != length(probs)) NULL else vals
+    })
+    n_complete <- sum(!sapply(boot_rows, is.null))
+    if (n_complete < 2) {
+      warning(paste0("dropping group ", this_g, " from group QTT (small groups)"))
+      return(NULL)
+    }
+    boot_mat  <- do.call(rbind, Filter(Negate(is.null), boot_rows))
+    qtt_est   <- aggte$group_results$qtt[aggte$group_results$group == this_g]
+    this_cval <- qtt_crit_val(boot_mat, qtt_est)
+    data.frame(group = this_g, probs = probs, se = unname(apply(boot_mat, 2, sd)),
+               cval = this_cval)
+  })
+  group_se_df   <- do.call(rbind, Filter(Negate(is.null), group_se_list))
+  group_results <- merge(aggte$group_results, group_se_df, by = c("group", "probs"), all.x = FALSE)
+  group_results$lower_pw <- group_results$qtt - z                    * group_results$se
+  group_results$upper_pw <- group_results$qtt + z                    * group_results$se
+  group_results$lower_ub <- group_results$qtt - group_results$cval   * group_results$se
+  group_results$upper_ub <- group_results$qtt + group_results$cval   * group_results$se
+  group_results$cval     <- NULL
+
+  pte_qtt( # nolint: object_usage_linter
+    overall    = overall_results,
+    dynamic    = dyn_results,
+    group      = group_results,
+    F0_overall = aggte$F0_overall, # nolint: object_name_linter
+    F1_overall = aggte$F1_overall, # nolint: object_name_linter
+    ptep       = ptep
+  )
+}
 
 
 #' @title Aggregate Group-Time Quantile of the Treatment Effect
@@ -405,32 +609,32 @@ qott_pte_aggregations <- function(attgt.list, ptep, extra_gt_returns) {
   qott_gt <- unlist(lapply(1:length(Fte_gt), function(j) {
     quantile(Fte_gt[[j]], probs = ret_quantile, type = 1)
   }))
-  groups <- unlist(BMisc::getListElement(attgt.list, "group"))
-  time.periods <- unlist(BMisc::getListElement(attgt.list, "time.period"))
+  groups <- unlist(BMisc::get_list_element(attgt.list, "group"))
+  time.periods <- unlist(BMisc::get_list_element(attgt.list, "time.period"))
   yname <- ptep$yname
   y.seq <- seq(-max(ptep$data[, yname]), max(ptep$data[, yname]), length.out = 1000)
 
-  Fte_overall <- BMisc::combineDfs(
+  Fte_overall <- BMisc::combine_ecdfs(
     y.seq = y.seq,
-    dflist = Fte_gt,
-    pstrat = attgt_res$overall_weights
+    ecdflist = Fte_gt,
+    weights = attgt_res$overall_weights
   )
   overall_qott <- quantile(Fte_overall, probs = ret_quantile, type = 1)
 
   dyn_qott <- lapply(attgt_res$dyn_weights, function(dw) {
-    Fte_e <- BMisc::combineDfs(
+    Fte_e <- BMisc::combine_ecdfs(
       y.seq = y.seq,
-      dflist = Fte_gt,
-      pstrat = dw$weights
+      ecdflist = Fte_gt,
+      weights = dw$weights
     )
     list(e = dw$e, att.e = quantile(Fte_e, probs = ret_quantile, type = 1))
   })
 
   group_qott <- lapply(attgt_res$group_weights, function(gw) {
-    Fte_g <- BMisc::combineDfs(
+    Fte_g <- BMisc::combine_ecdfs(
       y.seq = y.seq,
-      dflist = Fte_gt,
-      pstrat = gw$weights
+      ecdflist = Fte_gt,
+      weights = gw$weights
     )
     list(group = gw$g, att.g = quantile(Fte_g, probs = ret_quantile, type = 1))
   })

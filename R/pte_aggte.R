@@ -33,6 +33,7 @@ pte_aggte <- function(attgt,
   att <- attgt$att
   inf_func <- attgt$inf_func
   ptep <- attgt$ptep
+  panel <- ptep$panel
   bstrap <- ptep$bstrap
   if (is.null(bstrap)) bstrap <- TRUE # default to bootstrap
   cband <- ptep$cband
@@ -45,15 +46,12 @@ pte_aggte <- function(attgt,
   tlist <- sort(unique(time.period))
 
   first_period_data <- data[data[, tname] == tlist[1], ]
+  group_weight_data <- if (isTRUE(panel)) first_period_data else data
 
   originalt <- time.period
   originalgroup <- group
   originalglist <- glist
   originaltlist <- tlist
-
-  # In case g's are not part of tlist
-  # originalgtlist <- sort(unique(c(originaltlist, originalglist)))
-  # uniquet <- seq(1, length(unique(originalgtlist)))
 
   time.period <- sapply(originalt, orig2t, originaltlist)
   group <- sapply(originalgroup, orig2t, originaltlist)
@@ -61,10 +59,10 @@ pte_aggte <- function(attgt,
   tlist <- unique(time.period)
   maxT <- max(time.period)
 
-  weights.ind <- first_period_data$.w
+  weights.ind <- group_weight_data$.w
 
   # relative group sizes for all ever-treated groups
-  pg <- sapply(originalglist, function(g) mean(weights.ind * (first_period_data[, gname] == g)))
+  pg <- sapply(originalglist, function(g) mean(weights.ind * (group_weight_data[, gname] == g)))
   # normalized so that probabilities sum to 1
   pg <- pg / sum(pg)
 
@@ -78,7 +76,7 @@ pte_aggte <- function(attgt,
   keepers <- which(group <= time.period & time.period <= (group + max_e)) ### added second condition to allow for limit on longest period included in att
 
   # n x 1 vector of group variable
-  G <- unlist(lapply(first_period_data[, gname], orig2t, originaltlist))
+  G <- unlist(lapply(group_weight_data[, gname], orig2t, originaltlist))
 
   if (type == "group") {
     # get group specific ATTs
@@ -107,11 +105,11 @@ pte_aggte <- function(attgt,
     })
 
     # recover standard errors separately by group
-    selective.se.g <- unlist(BMisc::getListElement(selective.se.inner, "se"))
+    selective.se.g <- unlist(BMisc::get_list_element(selective.se.inner, "se"))
     selective.se.g[selective.se.g <= sqrt(.Machine$double.eps) * 10] <- NA
 
     # recover influence function separately by group
-    selective.inf.func.g <- simplify2array(BMisc::getListElement(selective.se.inner, "inf.func"))
+    selective.inf.func.g <- simplify2array(BMisc::get_list_element(selective.se.inner, "inf.func"))
 
     # use multiplier bootstrap (across groups) to get critical value
     # for constructing uniform confidence bands
@@ -130,13 +128,16 @@ pte_aggte <- function(attgt,
     selective.att <- sum(selective.att.g * pgg) / sum(pgg)
 
     # account for having to estimate pgg in the influence function
-    selective.wif <- wif(
-      keepers = 1:length(glist),
-      pg = pgg,
-      weights.ind = weights.ind,
-      G = G,
-      group = group
-    )
+    selective.wif <- NULL
+    if (isTRUE(panel)) {
+      selective.wif <- wif(
+        keepers = 1:length(glist),
+        pg = pgg,
+        weights.ind = weights.ind,
+        G = G,
+        group = group
+      )
+    }
 
     # get overall influence function
     selective.inf.func <- get_agg_inf_func(
@@ -174,7 +175,6 @@ pte_aggte <- function(attgt,
     # this looks at all available event times
     # note: event times can be negative here.
     # note: event time = 0 corresponds to "on impact"
-    # eseq <- unique(t-group)
     eseq <- unique(originalt - originalgroup)
     eseq <- eseq[order(eseq)]
 
@@ -210,7 +210,10 @@ pte_aggte <- function(attgt,
     dynamic.se.inner <- lapply(eseq, function(e) {
       whiche <- which((originalt - originalgroup == e) & (include.balanced.gt))
       pge <- pg[whiche] / (sum(pg[whiche]))
-      wif.e <- wif(whiche, pg, weights.ind, G, group)
+      wif.e <- NULL
+      if (isTRUE(panel)) {
+        wif.e <- wif(whiche, pg, weights.ind, G, group)
+      }
       inf.func.e <- as.numeric(get_agg_inf_func(
         att = att,
         inffunc1 = inf_func,
@@ -222,10 +225,10 @@ pte_aggte <- function(attgt,
       list(inf.func = inf.func.e, se = se.e)
     })
 
-    dynamic.se.e <- unlist(BMisc::getListElement(dynamic.se.inner, "se"))
+    dynamic.se.e <- unlist(BMisc::get_list_element(dynamic.se.inner, "se"))
     dynamic.se.e[dynamic.se.e <= sqrt(.Machine$double.eps) * 10] <- NA
 
-    dynamic.inf.func.e <- simplify2array(BMisc::getListElement(dynamic.se.inner, "inf.func"))
+    dynamic.inf.func.e <- simplify2array(BMisc::get_list_element(dynamic.se.inner, "inf.func"))
 
     dynamic.crit.val <- stats::qnorm(1 - alp / 2)
     if (cband == TRUE) {
@@ -392,6 +395,7 @@ overall_weights <- function(attgt,
   att <- attgt$att
   inf_func <- attgt$inf_func
   ptep <- attgt$ptep
+  panel <- ptep$panel
   bstrap <- ptep$bstrap
   if (is.null(bstrap)) bstrap <- TRUE # default to bootstrap
   cband <- ptep$cband
@@ -404,15 +408,12 @@ overall_weights <- function(attgt,
   tlist <- sort(unique(time.period))
 
   first_period_data <- data[data[, tname] == tlist[1], ]
+  group_weight_data <- if (isTRUE(panel)) first_period_data else data
 
   originalt <- time.period
   originalgroup <- group
   originalglist <- glist
   originaltlist <- tlist
-
-  # In case g's are not part of tlist
-  # originalgtlist <- sort(unique(c(originaltlist, originalglist)))
-  # uniquet <- seq(1, length(unique(originalgtlist)))
 
   time.period <- sapply(originalt, orig2t, originaltlist)
   group <- sapply(originalgroup, orig2t, originaltlist)
@@ -420,10 +421,10 @@ overall_weights <- function(attgt,
   tlist <- unique(time.period)
   maxT <- max(time.period)
 
-  weights.ind <- first_period_data$.w
+  weights.ind <- group_weight_data$.w
 
   # relative group sizes for all ever-treated groups
-  pg <- sapply(originalglist, function(g) mean(weights.ind * (first_period_data[, gname] == g)))
+  pg <- sapply(originalglist, function(g) mean(weights.ind * (group_weight_data[, gname] == g)))
   # normalized so that probabilities sum to 1
   pg <- pg / sum(pg)
 
