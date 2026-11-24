@@ -3,7 +3,7 @@
 # Description: Functions for setting up pte_params objects used throughout
 #   the ptetools pipeline: setup_pte_basic, setup_pte, and pte_params.
 # Author: Brant Callaway
-# Last update: 2026-05-18
+# Last update: 2026-11-19
 # Date created: 2021-05-14
 # =============================================================================
 
@@ -40,9 +40,11 @@ setup_pte_basic <- function(yname,
                             idname = NULL,
                             data,
                             panel = TRUE,
+                            weightsname = NULL,
                             cband = TRUE,
                             alp = 0.05,
                             boot_type = "multiplier",
+                            bstrap = TRUE,
                             gt_type = "att",
                             ret_quantile = 0.5,
                             probs = NULL,
@@ -64,19 +66,28 @@ setup_pte_basic <- function(yname,
     id <- seq_len(nrow(data))
   }
 
-  data$G <- G
-  data$id <- id
-  n <- length(unique(data$id))
-  data$period <- period
-  data$Y <- data[, yname]
-  data$.w <- rep(1, nrow(data))
+  # internal columns are dot-prefixed so they never overwrite the user's
+  # columns (see setup_pte() for the column contract)
+  data$.G <- G
+  data$.id <- id
+  data$.period <- period
+  data$.Y <- data[, yname]
+  # sampling weights (#21); all 1 without weightsname. Checked in
+  # pte_params(), as for setup_pte()
+  data$.w <- if (is.null(weightsname)) {
+    rep(1, nrow(data))
+  } else {
+    data[, weightsname]
+  }
   data$.rowid <- seq_len(nrow(data))
 
-  time.periods <- sort(unique(data$period))
-  groups <- unique(data$G)
+  time.periods <- sort(unique(data$.period))
+  groups <- unique(data$.G)
 
-  # drop never treated group
-  groups <- sort(groups)[-1]
+  # treated groups (all values except 0, the never-treated group); dropping
+  # the smallest value instead dropped a real cohort when no unit is never
+  # treated
+  groups <- sort(setdiff(groups, 0))
 
   # sort the time periods and drop the first period
   time.periods <- sort(time.periods)[-1]
@@ -88,11 +99,13 @@ setup_pte_basic <- function(yname,
     idname = idname,
     data = data,
     panel = panel,
+    weightsname = weightsname,
     glist = groups,
     tlist = time.periods,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
+    bstrap = bstrap,
     gt_type = gt_type,
     ret_quantile = ret_quantile,
     probs = probs,
@@ -118,6 +131,12 @@ setup_pte_basic <- function(yname,
 #' @inheritParams pte_params
 #' @param required_pre_periods The number of required pre-treatment periods to implement
 #'  the estimation strategy.  Default is 1.
+#' @param require_comparison Whether the design must have comparison units
+#'  (default \code{TRUE}). \code{FALSE} is for estimators that use only
+#'  variation within each group and build their own group-time cells without
+#'  comparison units, such as contdid's average causal response (ACRT) when
+#'  no unit is untreated: setup then does not check for comparison units, and
+#'  every group is estimated. Estimators of ATT(g,t) need comparison units.
 #' @param ... additional arguments
 #'
 #' @return \code{pte_params} object
@@ -132,9 +151,13 @@ setup_pte <- function(yname,
                       required_pre_periods = 1,
                       anticipation = 0,
                       base_period = "varying",
+                      control_group = "notyettreated",
+                      clustervars = NULL,
+                      require_comparison = TRUE,
                       cband = TRUE,
                       alp = 0.05,
                       boot_type = "multiplier",
+                      bstrap = TRUE,
                       weightsname = NULL,
                       gt_type = "att",
                       ret_quantile = 0.5,
@@ -144,6 +167,15 @@ setup_pte <- function(yname,
                       call = NULL,
                       ...) {
   data <- as.data.frame(data)
+
+  # comparison group: any other value used to be treated as never treated
+  # without a warning, so a typo silently changed the results
+  if (!(is.character(control_group) && length(control_group) == 1 &&
+          control_group %in% c("notyettreated", "nevertreated",
+                               "eventuallytreated"))) {
+    stop("control_group must be \"notyettreated\", \"nevertreated\" or ",
+         "\"eventuallytreated\".", call. = FALSE)
+  }
 
   # setup data
   G <- data[, gname]
@@ -162,11 +194,44 @@ setup_pte <- function(yname,
     .w <- data[, weightsname]
   }
 
-  data$G <- G
-  data$id <- id
-  n <- length(unique(data$id))
-  data$Y <- data[, yname]
+  # Internal columns are dot-prefixed (.G, .id, .period, .Y, .w, .rowid) so
+  # they never overwrite the user's columns. Later steps (aggregation,
+  # mapping results back to the original time scale, the empirical bootstrap)
+  # read the user's columns by name and need their original values (#13).
+  # Subset functions read only the dot columns; gt_data_frame() then gives
+  # each (g,t) cell the plain names (G, id, period, Y) that attgt functions
+  # use.
+  data$.id <- id
+  data$.Y <- data[, yname]
   data$.w <- .w
+
+  # cluster variable for standard errors (#6), as in did::att_gt(): at most
+  # one variable beyond idname, constant within unit; stored as .cluster
+  clustervars <- setdiff(clustervars, idname)
+  if (length(clustervars) > 1) {
+    stop("At most one cluster variable (beyond idname) is supported.",
+         call. = FALSE)
+  }
+  if (length(clustervars) == 1) {
+    if (!(clustervars %in% colnames(data))) {
+      stop("clustervars = \"", clustervars, "\" is not a column of data.",
+           call. = FALSE)
+    }
+    data$.cluster <- data[[clustervars]]
+    if (anyNA(data$.cluster)) {
+      stop("The cluster variable has missing values.", call. = FALSE)
+    }
+    if (isTRUE(panel)) {
+      n_per_unit <- tapply(data$.cluster, data$.id,
+                           function(x) length(unique(x)))
+      if (any(n_per_unit > 1)) {
+        stop("The cluster variable must be constant over time within each ",
+             "unit.", call. = FALSE)
+      }
+    }
+  } else {
+    clustervars <- NULL
+  }
 
   time.periods <- sort(unique(period))
 
@@ -176,10 +241,64 @@ setup_pte <- function(yname,
   }
 
 
-  groups <- unique(data$G)
+  # Eventually-treated comparison units (#29): units treated at some point
+  # but not yet treated (net of anticipation) in both periods of the cell,
+  # i.e. not-yet-treated units other than the never treated. They are
+  # implemented by dropping the never-treated units here and then using
+  # not-yet-treated comparisons; with no never-treated units left, the
+  # latest-treated cohort becomes the comparison group below. Dropping them
+  # first keeps units first treated after the sample ends, which are
+  # eventually treated, as comparison units.
+  if (identical(control_group, "eventuallytreated")) {
+    keep_rows <- is.na(G) | G != 0
+    data <- data[keep_rows, , drop = FALSE]
+    G <- G[keep_rows]
+    period <- period[keep_rows]
+    if (nrow(data) == 0) {
+      stop("control_group = \"eventuallytreated\" needs units that are ",
+           "treated at some point.", call. = FALSE)
+    }
+    time.periods <- sort(unique(period))
+  }
 
-  # drop never treated group
-  groups <- sort(groups)[-1]
+  # Units first treated more than `anticipation` time units after the last
+  # period are untreated (and not anticipating) throughout the sample; treat
+  # them as never treated, as did::att_gt() does. Usually their timing is not
+  # even known. Only the internal .G changes; the user's column is untouched.
+  G[!is.na(G) & G > max(time.periods) + anticipation] <- 0
+
+  # No never-treated units: as in did::att_gt(), the latest-treated cohort
+  # serves as the comparison group. Periods from its treatment date (net of
+  # anticipation) on are dropped, since no comparison units remain there,
+  # and the cohort itself is not estimated: it is used as never treated
+  # (control_group = "nevertreated", with a warning) or as not yet treated.
+  # Previously the earliest cohort was dropped instead.
+  # (not with require_comparison = FALSE, for estimators that use only
+  # variation within each group and need no comparison units, such as
+  # contdid's ACRT)
+  if (isTRUE(require_comparison) && !any(G == 0, na.rm = TRUE)) {
+    latest_g <- max(G, na.rm = TRUE)
+    keep_rows <- period < latest_g - anticipation
+    if (!any(keep_rows) || all(G[keep_rows] == latest_g, na.rm = TRUE)) {
+      stop("There are no comparison units: every unit is first treated in ",
+           "the same period and there is no never-treated group, so no ",
+           "group-time effects can be estimated.", call. = FALSE)
+    }
+    if (identical(control_group, "nevertreated")) {
+      warning("No never-treated group is available. The last treated ",
+              "cohort (", latest_g, ") is used as the never-treated ",
+              "comparison group, and periods from ", latest_g - anticipation,
+              " on are dropped.", call. = FALSE)
+    }
+    data <- data[keep_rows, , drop = FALSE]
+    G <- G[keep_rows]
+    period <- period[keep_rows]
+    G[G == latest_g] <- 0
+    time.periods <- sort(unique(period))
+  }
+
+  # treated groups (all values except 0, the never-treated group)
+  groups <- sort(setdiff(unique(G), 0))
 
   # do some recoding to make sure time periods are 1 unit apart
   # and then put these back together at the end
@@ -187,47 +306,59 @@ setup_pte <- function(yname,
   original_time.periods <- time.periods
   original_groups <- groups
 
-  # get new time periods / groups
-  time.periods <- sapply(original_time.periods,
-    BMisc::orig2t,
-    original_time.periods = original_time.periods
-  )
-  groups <- sapply(original_groups,
-    BMisc::orig2t,
-    original_time.periods = original_time.periods
-  )
+  # get new time periods / groups (orig2t() is vectorized; one call per
+  # vector rather than one per row)
+  time.periods <- BMisc::orig2t(original_time.periods, original_time.periods)
+  groups <- BMisc::orig2t(original_groups, original_time.periods)
 
   # put the period in new time scale
-  data$period <- sapply(period,
-    BMisc::orig2t,
-    original_time.periods = original_time.periods
-  )
-  data$G <- sapply(G,
-    BMisc::orig2t,
-    original_time.periods = original_time.periods
-  )
+  data$.period <- BMisc::orig2t(period, original_time.periods)
+  data$.G <- BMisc::orig2t(G, original_time.periods)
+  if (is.list(data$.G) || anyNA(data$.G)) {
+    stop("Every value of gname must be 0 (never treated) or one of the time periods in tname.")
+  }
 
-  t_adjust <- 0
-  # sort the time periods and drop the first
-  # \code{required_pre_periods} time periods
-  # these are the ones we loop over below
-  if (base_period == "universal") {
-    time.periods <- sort(time.periods)
-    groups <- groups[groups %in% time.periods[-1]]
-    # account for anticipation
-    groups <- groups[groups >= (min(time.periods + 1) + anticipation)]
-    # drop early treated groups
-    data <- data[!(data$G %in% seq(1, required_pre_periods + anticipation)), ]
-  } else {
-    time.periods <- sort(time.periods)[-seq(1, required_pre_periods)]
-    groups <- groups[groups %in% time.periods]
-    # account for anticipation
-    groups <- groups[groups >= (min(time.periods) + anticipation)]
-    # drop early treated groups
-    data <- data[!(data$G %in% seq(1, required_pre_periods + anticipation)), ]
+  # Groups need at least `required_pre_periods` periods before treatment,
+  # counting only periods p with p + anticipation < g in units of tname (as
+  # in did::att_gt()); earlier-treated groups are dropped, units and all.
+  all_groups <- setdiff(unique(data$.G), 0)
+  n_pre <- vapply(all_groups, function(gg) {
+    sum(original_time.periods + anticipation < original_time.periods[gg])
+  }, numeric(1))
+  early_groups <- all_groups[n_pre < required_pre_periods]
+  groups <- groups[!(groups %in% early_groups)]
+  data <- data[!(data$.G %in% early_groups), ]
+  if (length(groups) == 0) {
+    stop("No treated group has a base period: each group needs ",
+         required_pre_periods, " period(s) more than anticipation = ",
+         anticipation, " before it is first treated.", call. = FALSE)
+  }
+
+  # time periods to loop over: all of them with a universal base period;
+  # with a varying base period, drop the first required_pre_periods, which
+  # have no earlier base period
+  time.periods <- sort(time.periods)
+  if (base_period != "universal") {
+    time.periods <- time.periods[-seq(1, required_pre_periods)]
+  }
+
+  # Sort panel data by (id, period). Downstream code lines up unit-level
+  # vectors by position: the influence-function rows follow unique(data$.id),
+  # and the 2x2 cells and first-period group weights follow row order. With
+  # this order they all agree regardless of how the input was sorted (#9).
+  if (isTRUE(panel)) {
+    data <- data[order(data$.id, data$.period), , drop = FALSE]
   }
 
   data$.rowid <- seq_len(nrow(data))
+
+  # Row indices by period and the unit ids, computed once here so that
+  # two_by_two_subset() can build each (g,t) cell by position instead of
+  # scanning the full data for every cell.
+  attr(data, "pte_period_rows") <- split(seq_len(nrow(data)), data$.period)
+  # original time periods, to map .period / .G back to calendar time
+  attr(data, "pte_time_periods") <- original_time.periods
+  attr(data, "pte_ids") <- unique(data$.id)
 
 
   params <- pte_params(
@@ -242,9 +373,14 @@ setup_pte <- function(yname,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
+    bstrap = bstrap,
     anticipation = anticipation,
     base_period = base_period,
+    # stored so later steps (e.g. process_dose_gt()) use the requested
+    # comparison group; it was always the default before (contdid #19)
+    control_group = control_group,
     weightsname = weightsname,
+    clustervars = clustervars,
     gt_type = gt_type,
     ret_quantile = ret_quantile,
     probs = probs,
@@ -252,6 +388,9 @@ setup_pte <- function(yname,
     cl = cl,
     call = call
   )
+  # whether group-time cells have comparison units (used by
+  # process_dose_gt())
+  params$require_comparison <- require_comparison
 
   params
 }
@@ -276,8 +415,21 @@ setup_pte <- function(yname,
 #'  confidence band (default is TRUE)
 #' @param alp significance level; default is 0.05
 #' @param boot_type which type of bootstrap to use
-#' @param anticipation how many periods before the treatment actually takes
-#'  place that it can have an effect on outcomes
+#' @param bstrap whether to use the multiplier bootstrap (`TRUE`, the default)
+#'  or purely analytical standard errors (`FALSE`) when the group-time
+#'  estimator returns an influence function.  `bstrap = FALSE` overrides
+#'  `boot_type` (i.e., `boot_type = "empirical"` is ignored) and only
+#'  supports pointwise confidence intervals -- if `cband = TRUE` is also
+#'  requested, `ptetools` falls back to pointwise intervals with a warning.
+#'  Analytical standard errors are not currently supported for continuous
+#'  treatment (`gt_type = "dose"`): with `bstrap = FALSE`, the multiplier
+#'  bootstrap is used instead, with a warning.
+#' @param anticipation how long before the treatment actually takes place it
+#'  can already affect outcomes, in units of the time variable \code{tname}
+#'  (e.g., years), as in \code{did::att_gt()}. With unequally spaced periods
+#'  this is not the same as a number of periods. Units first treated more
+#'  than \code{anticipation} after the last period are treated as never
+#'  treated.
 #' @param base_period The type of base period to use.  This only affects
 #'  the numeric value of results in pre-treatment periods.  Results in
 #'  post-treatment periods are not affected by this choice.  The default
@@ -289,10 +441,21 @@ setup_pte <- function(yname,
 #'  identification strategies.
 #' @param weightsname The name of the column that contains sampling weights.
 #'  The default is NULL, in which case no sampling weights are used.
+#' @param clustervars The name of a variable to cluster standard errors on,
+#'  in addition to \code{idname} (as in \code{did::att_gt()}): one variable,
+#'  constant over time within each unit (e.g. state when units are
+#'  counties). The default is NULL, which clusters at the unit level.
+#'  Clustering applies to analytical standard errors, the multiplier
+#'  bootstrap (one multiplier per cluster) and the empirical bootstrap
+#'  (whole clusters are resampled).
 #' @param control_group Which group is used as the comparison group.
-#'  The default choice is "notyettreated", but
-#'  different estimation strategies can implement their own choices
-#'  for the control group
+#'  The default choice is "notyettreated" (units not yet treated in either
+#'  period of a group-time comparison, including never-treated units).
+#'  "nevertreated" uses only never-treated units, and "eventuallytreated"
+#'  uses not-yet-treated units excluding the never treated (as in
+#'  \code{setup_pte()}; units first treated after the last period count as
+#'  eventually treated). Different estimation strategies can implement
+#'  their own choices for the control group.
 #' @param gt_type which type of group-time effects are computed.
 #'  The default is "att".  Different estimation strategies can implement
 #'  their own choices for `gt_type`
@@ -310,8 +473,21 @@ setup_pte <- function(yname,
 #' @param group_fun Logical indicating whether or not untreated potential outcomes
 #'  can be estimated for all time periods for a single group.  Not supported yet.
 #'  These functions aim at reducing or eliminating running the same code multiple times.
-#' @param biters number of bootstrap iterations; default is 100
-#' @param cl number of clusters to be used when bootstrapping; default is 1
+#' @param biters number of bootstrap iterations; default is 100.
+#'  \code{biters = 0} skips the bootstrap: where \code{attgt_fun} returns an
+#'  influence function this is the same as \code{bstrap = FALSE} (analytical,
+#'  pointwise standard errors); where standard errors are only available
+#'  from the bootstrap (the empirical bootstrap, dose-specific effects), the
+#'  point estimates are returned with \code{NA} standard errors.
+#' @param cl parallel workers for the empirical bootstrap (the multiplier
+#'  bootstrap does not need them); default is 1 (no parallelization). Either
+#'  a number of workers or a cluster object from
+#'  \code{parallel::makeCluster()}. A number uses forked processes on
+#'  Unix/macOS; on Windows, which cannot fork, a cluster with that many
+#'  workers is created and stopped automatically. Cluster workers are
+#'  separate R sessions: they load the installed packages, and functions
+#'  defined in your workspace (e.g. a custom \code{attgt_fun}) must not rely
+#'  on other objects in your workspace.
 #' @param call keeps track of through the `call` from external functions/packages
 #'
 #' @return \code{pte_params} object
@@ -328,9 +504,11 @@ pte_params <- function(yname,
                        cband,
                        alp,
                        boot_type,
+                       bstrap = TRUE,
                        anticipation = NULL,
                        base_period = NULL,
                        weightsname = NULL,
+                       clustervars = NULL,
                        control_group = "notyettreated",
                        gt_type = "att",
                        ret_quantile = 0.5,
@@ -341,6 +519,8 @@ pte_params <- function(yname,
                        biters,
                        cl,
                        call = NULL) {
+  if (!is.null(weightsname)) validate_weights(data, panel)
+
   obj <- list(
     yname = yname,
     gname = gname,
@@ -353,10 +533,12 @@ pte_params <- function(yname,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
+    bstrap = bstrap,
     anticipation = anticipation,
     control_group = control_group,
     base_period = base_period,
     weightsname = weightsname,
+    clustervars = clustervars,
     gt_type = gt_type,
     ret_quantile = ret_quantile,
     probs = probs,
@@ -368,4 +550,33 @@ pte_params <- function(yname,
   class(obj) <- "pte_params"
 
   obj
+}
+
+
+# --- Internal: check sampling weights (#24) ---------------------------------
+# Called by pte_params(), so every setup function (in ptetools or in packages
+# built on it) gets these checks. Weights (column .w) must be non-missing,
+# finite and non-negative with a positive sum; with panel data they must also
+# be constant within each unit, as in did::att_gt(): estimators combine pre-
+# and post-period weights for the same units, which only makes sense if each
+# unit has one weight.
+validate_weights <- function(data, panel = TRUE) {
+  w <- data$.w
+  if (is.null(w)) return(invisible(NULL))
+  if (!is.numeric(w) || anyNA(w) || any(!is.finite(w))) {
+    stop("Sampling weights must be numeric, non-missing and finite.",
+         call. = FALSE)
+  }
+  if (any(w < 0) || sum(w) <= 0) {
+    stop("Sampling weights must be non-negative with a positive sum.",
+         call. = FALSE)
+  }
+  if (isTRUE(panel) && !is.null(data$.id)) {
+    n_values <- tapply(w, data$.id, function(x) length(unique(x)))
+    if (any(n_values > 1)) {
+      stop("Sampling weights must be constant over time within each unit.",
+           call. = FALSE)
+    }
+  }
+  invisible(NULL)
 }

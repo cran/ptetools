@@ -1,3 +1,13 @@
+# =============================================================================
+# Title: Subset Functions
+# Description: Functions that build the data for a single (g,t) cell:
+#   two_by_two_subset (panel), two_by_two_rcs_subset (repeated cross
+#   sections), keep_all_untreated_subset and keep_all_pretreatment_subset.
+# Author: Brant Callaway
+# Last update: 2026-11-19
+# Date created: 2021-05-17
+# =============================================================================
+
 #' @title Two Period Two Group Subset
 #'
 #' @description A function for computing a 2x2 subset of original data.
@@ -10,8 +20,8 @@
 #' @param data the full dataset
 #' @param g the current group
 #' @param tp the current time period
-#' @param control_group whether to use "notyettreated" (default) or
-#'  "nevertreated"
+#' @param control_group whether to use "notyettreated" (default),
+#'  "nevertreated" or "eventuallytreated" (see \code{\link{pte_params}})
 #' @param anticipation the number of periods of anticipation (i.e., number
 #'  of periods before the treatment happens where the treatment can "already"
 #'  affect the outcome)
@@ -31,56 +41,145 @@ two_by_two_subset <- function(data,
                               anticipation = 0,
                               base_period = "varying",
                               ...) {
-  # get the correct "base" period for this group
-  main.base.period <- g - anticipation - 1
+  # base period for this cell: the period just before tp in pre-treatment
+  # cells with a varying base period, otherwise the last period at least
+  # `anticipation` time units before g (as in did::att_gt())
+  base.period <- pte_base_period(data, g, tp, anticipation, base_period)
 
-  #----------------------------------------------------
-  if (base_period == "varying") {
-    # if it's a pre-treatment time period (used for the
-    # pre-test, we need to adjust the base period)
-
-    # group not treated yet
-    if (tp < (g - anticipation)) {
-      # move to earlier period
-      # not going to include anticipation here
-      base.period <- tp - 1
-    } else {
-      # this is a post-treatment period
-      base.period <- main.base.period
-    }
-  } else {
-    base.period <- main.base.period
-  }
-  #----------------------------------------------------
-
-  #----------------------------------------------------
-  # collect the right subset of the data
-
-  # get group g and not-yet-treated group
-  if (control_group == "notyettreated") {
-    this.data <- subset(data, G == g | G > tp | G == 0)
-  } else {
-    # use never treated group
-    this.data <- subset(data, G == g | G == 0)
-  }
-
-  # get current period and base period data
-  this.data <- subset(this.data, period == tp | period == base.period)
+  # collect the right subset of the data: group g plus the comparison group
+  # (not-yet-treated or never-treated), in the current and base periods
+  this.data <- gt_cell_data(data, g, tp, base.period, control_group,
+                            anticipation)
 
   # variable to keep track of pre/post periods
-  this.data$name <- ifelse(this.data$period == tp, "post", "pre")
+  this.data$name <- ifelse(this.data$.period == tp, "post", "pre")
 
   # variable to indicate local treatment status
-  this.data$D <- 1 * (this.data$G == g)
+  this.data$D <- 1 * (this.data$.G == g)
 
   # make this.data into gt_data_frame object
   this.data <- gt_data_frame(this.data)
 
   # number of observations used for this (g,t)
-  n1 <- length(unique(this.data$id))
-  disidx <- unique(data$id) %in% unique(this.data$id)
+  n1 <- length(unique(this.data$.id))
+  all_ids <- attr(data, "pte_ids")
+  if (is.null(all_ids)) all_ids <- unique(data$.id)
+  disidx <- all_ids %in% unique(this.data$.id)
 
   list(gt_data = this.data, n1 = n1, disidx = disidx)
+}
+
+# --- Calendar time and base periods ----------------------------------------
+# Exported so that custom subset functions (e.g. in qte) can follow the same
+# rules as two_by_two_subset() without relying on ptetools internals.
+
+#' @title Calendar Time of Internal Periods
+#'
+#' @description [setup_pte()] recodes time periods and groups to 1, ..., T
+#'  (the internal columns \code{.period} and \code{.G}). Anticipation and
+#'  base periods are defined in units of the time variable (calendar time),
+#'  as in \code{did::att_gt()}, so custom subset functions that compare
+#'  periods with anticipation should map them back with this function.
+#'
+#' @param data the full data from a setup function (e.g. \code{ptep$data})
+#' @param p internal period indices (e.g. values of \code{.period} or
+#'  \code{.G}); 0, the never-treated group, maps to \code{NA}
+#'
+#' @return the calendar times of \code{p}. For data whose periods were not
+#'  recoded (e.g. from [setup_pte_basic()]), \code{p} itself.
+#'
+#' @export
+pte_calendar_time <- function(data, p) {
+  cal <- attr(data, "pte_time_periods")
+  if (is.null(cal)) {
+    return(ifelse(p > 0, p, NA_real_))
+  }
+  out <- rep(NA_real_, length(p))
+  pos <- !is.na(p) & p > 0
+  out[pos] <- cal[p[pos]]
+  out
+}
+
+#' @title Base Period of a Group-Time Cell
+#'
+#' @description The base period for the cell of group \code{g} in period
+#'  \code{tp}, as in \code{did::att_gt()}. Post-treatment cells (\code{tp}
+#'  at least \code{g - anticipation}, in calendar time) and all cells with a
+#'  universal base period use the last period \code{p} with
+#'  \code{p + anticipation < g}; pre-treatment cells with a varying base
+#'  period use the period just before \code{tp}. Used by
+#'  [two_by_two_subset()]; useful for custom subset functions.
+#'
+#' @inheritParams pte_calendar_time
+#' @param g the group (internal period index of first treatment)
+#' @param tp the current period (internal period index)
+#' @param anticipation anticipation, in units of the time variable
+#' @param base_period \code{"varying"} or \code{"universal"}
+#'
+#' @return the base period as an internal period index, or \code{NA} if
+#'  group \code{g} has no period early enough to serve as its base period
+#'
+#' @export
+pte_base_period <- function(data, g, tp, anticipation = 0,
+                            base_period = "varying") {
+  cal <- attr(data, "pte_time_periods")
+  periods <- if (is.null(cal)) sort(unique(data$.period)) else seq_along(cal)
+  cal_periods <- pte_calendar_time(data, periods)
+  cal_g <- pte_calendar_time(data, g)
+
+  post <- pte_calendar_time(data, tp) >= cal_g - anticipation
+  candidates <- if (base_period == "varying" && !post) {
+    periods[periods < tp]
+  } else {
+    periods[cal_periods + anticipation < cal_g]
+  }
+  if (length(candidates) == 0) NA else max(candidates)
+}
+
+# --- Internal: rows of a 2x2 cell ----------------------------------------
+# Returns the rows of `data` for group g and its comparison group in periods
+# tp and base.period, in their original order (the same rows as
+# subset(data, <group condition> & <period condition>)).
+#
+# Not-yet-treated comparison units must be untreated, and not yet
+# anticipating treatment, in *both* periods of the cell: units first treated
+# more than `anticipation` time units after max(tp, base.period), as in
+# did::att_gt(). With a universal base period, the base period comes after
+# tp in pre-treatment cells; selecting on G > tp alone would use units that
+# are already treated in the base period as controls (#16).
+#
+# When `data` comes from setup_pte(), it carries the row indices of each
+# period ("pte_period_rows"), so only the rows of the two periods are
+# examined and copied; otherwise this falls back to scanning all rows.
+gt_cell_data <- function(data, g, tp, base.period, control_group,
+                         anticipation = 0) {
+  threshold <- pte_calendar_time(data, max(tp, base.period)) + anticipation
+  in_group <- function(G) {
+    if (control_group %in% c("notyettreated", "eventuallytreated")) {
+      # NA calendar time for G == 0 is harmless: G == 0 is TRUE there.
+      # For "eventuallytreated", setup_pte() has already dropped the never
+      # treated; G == 0 is then the latest cohort (or units first treated
+      # after the sample ends), which are never treated within the sample
+      # that remains (#29).
+      G == g | G == 0 | pte_calendar_time(data, G) > threshold
+    } else if (control_group == "nevertreated") {
+      G == g | G == 0
+    } else {
+      stop("control_group must be \"notyettreated\", \"nevertreated\" or ",
+           "\"eventuallytreated\".", call. = FALSE)
+    }
+  }
+
+  period_rows <- attr(data, "pte_period_rows")
+  if (!is.null(period_rows) && sum(lengths(period_rows)) == nrow(data)) {
+    rows <- sort(c(period_rows[[as.character(tp)]],
+                   period_rows[[as.character(base.period)]]))
+    # which() drops NA, as subset() does
+    return(data[rows[which(in_group(data$.G[rows]))], , drop = FALSE])
+  }
+
+  in_period <- data$.period == tp | data$.period == base.period
+  data[which(in_group(data$.G) & in_period), , drop = FALSE]
 }
 
 #' @title Two Period Two Group Repeated Cross Sections Subset
@@ -105,28 +204,13 @@ two_by_two_rcs_subset <- function(data,
                                   anticipation = 0,
                                   base_period = "varying",
                                   ...) {
-  # get the correct "base" period for this group
-  main.base.period <- g - anticipation - 1
+  # base period as in two_by_two_subset()
+  base.period <- pte_base_period(data, g, tp, anticipation, base_period)
 
-  if (base_period == "varying") {
-    if (tp < (g - anticipation)) {
-      base.period <- tp - 1
-    } else {
-      base.period <- main.base.period
-    }
-  } else {
-    base.period <- main.base.period
-  }
-
-  if (control_group == "notyettreated") {
-    this.data <- subset(data, G == g | G > tp | G == 0)
-  } else {
-    this.data <- subset(data, G == g | G == 0)
-  }
-
-  this.data <- subset(this.data, period == tp | period == base.period)
-  this.data$name <- ifelse(this.data$period == tp, "post", "pre")
-  this.data$D <- 1 * (this.data$G == g)
+  this.data <- gt_cell_data(data, g, tp, base.period, control_group,
+                            anticipation)
+  this.data$name <- ifelse(this.data$.period == tp, "post", "pre")
+  this.data$D <- 1 * (this.data$.G == g)
   this.data <- gt_data_frame(this.data)
 
   n1 <- nrow(this.data)
@@ -163,8 +247,10 @@ keep_all_untreated_subset <- function(data, g, tp, ...) {
   # drop post-treatment observations that are not in group g
   # this creates the same sort of unbalanced panel data set
   # used in imputation papers.
-  data$.treat <- 1 * ((data$G <= data$period) & (data$G != 0))
-  this.data <- subset(data, (.treat == 0) | (G == g))
+  G <- data$.G
+  period <- data$.period
+  treated_now <- (G <= period) & (G != 0)
+  keep <- !treated_now | (G == g)
 
   # This line drops any periods after the "current" period too (even
   # if these are untreated) for group g.
@@ -172,14 +258,16 @@ keep_all_untreated_subset <- function(data, g, tp, ...) {
   # where it seems ambiguous/confusing what exactly to do and rules
   # out that later periods will be used to estimate the model for untreated
   # potential outcomes using group g.
-  this.data <- subset(this.data, !(G == g & period > tp))
+  keep <- keep & !(G == g & period > tp)
+  this.data <- data[which(keep), , drop = FALSE]
 
   # variable to keep track of pre/post periods
-  this.data$name <- ifelse(this.data$period == tp, "post", "pre")
+  this.data$name <- ifelse(this.data$.period == tp, "post", "pre")
 
-  this.data$D <- 1 * ((this.data$G == g) & this.data$period >= tp)
-  n1 <- length(unique(this.data$id))
-  disidx <- unique(data$id) %in% unique(this.data$id)
+  this.data$D <- 1 * ((this.data$.G == g) & this.data$.period >= tp)
+  this.data <- gt_data_frame(this.data)
+  n1 <- length(unique(this.data$.id))
+  disidx <- unique(data$.id) %in% unique(this.data$.id)
 
   list(gt_data = this.data, n1 = n1, disidx = disidx)
 }
@@ -208,16 +296,18 @@ keep_all_untreated_subset <- function(data, g, tp, ...) {
 #'
 #' @export
 keep_all_pretreatment_subset <- function(data, g, tp, ...) {
-  this.data <- subset(data, period <= tp)
-  # keep group g, not-yet-treated groups, and never-treated group
-  this.data <- subset(this.data, (G == g) | (G > tp) | (G == 0))
+  G <- data$.G
+  # periods up to tp; group g, not-yet-treated groups, and never-treated group
+  keep <- (data$.period <= tp) & ((G == g) | (G > tp) | (G == 0))
+  this.data <- data[which(keep), , drop = FALSE]
 
   # variable to keep track of pre/post periods
-  this.data$name <- ifelse(this.data$period == tp, "post", "pre")
+  this.data$name <- ifelse(this.data$.period == tp, "post", "pre")
 
-  this.data$D <- 1 * ((this.data$G == g) & this.data$period >= tp)
-  n1 <- length(unique(this.data$id))
-  disidx <- unique(data$id) %in% unique(this.data$id)
+  this.data$D <- 1 * ((this.data$.G == g) & this.data$.period >= tp)
+  this.data <- gt_data_frame(this.data)
+  n1 <- length(unique(this.data$.id))
+  disidx <- unique(data$.id) %in% unique(this.data$.id)
 
   list(gt_data = this.data, n1 = n1, disidx = disidx)
 }

@@ -1,6 +1,6 @@
 Package: ptetools
 Title: Panel Treatment Effects Tools
-Version: 1.0.1
+Version: 1.1.0
 Authors@R: 
     person(given = "Brantly",
            family = "Callaway",
@@ -13,14 +13,14 @@ Depends: R (>= 4.1.0)
 License: GPL-3
 Encoding: UTF-8
 LazyData: true
-Imports: BMisc (>= 1.4.8), Matrix, ggplot2, DRDID, data.table, dplyr,
+Imports: BMisc (>= 1.4.11), Matrix, ggplot2, DRDID, dplyr, parallel,
         pbapply, splines2
 Suggests: testthat (>= 3.0.0), did
 Config/testthat/edition: 3
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/version: 8.1.1
 NeedsCompilation: no
-Packaged: 2026-07-20 04:05:00 UTC; bmc43193
+Packaged: 2026-11-23 17:42:54 UTC; bmc43193
 Author: Brantly Callaway [aut, cre]
 Maintainer: Brantly Callaway <brantly.callaway@uga.edu>
 Repository: CRAN
-Date/Publication: 2026-07-20 12:20:02 UTC
+Date/Publication: 2026-11-24 00:00:08 UTC

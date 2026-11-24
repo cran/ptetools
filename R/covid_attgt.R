@@ -3,7 +3,7 @@
 # Description: Unconfoundedness-based ATT(g,t) estimator for pandemic policy
 #   evaluation (Callaway and Li 2021). Moved here from the ppe package.
 # Author: Brant Callaway
-# Last update: 2026-05-25
+# Last update: 2026-11-19
 # Date created: 2021-05-14
 # =============================================================================
 
@@ -28,6 +28,9 @@
 #'   changes (differences). Default is \code{~-1} (no change covariates).
 #' @param ... extra arguments; not used
 #'
+#' @details Sampling weights (\code{weightsname} in \code{pte()}, stored as
+#'   \code{.w}) are passed to \code{DRDID::drdid_panel()}.
+#'
 #' @return \code{attgt_if} object
 #'
 #' @references Callaway, B. and Li, T. (2021). Policy Evaluation during a
@@ -40,22 +43,14 @@ covid_attgt <- function(gt_data, xformla, d_outcome = FALSE,
   # handle covariates
   #-----------------------------------------------------------------------------
 
-  # pre-treatment covariates
-  Xpre <- model.frame(xformla, data = subset(gt_data, name == "pre"))
+  # pre and post rows, matched by unit
+  pp <- gt_pre_post(gt_data)
 
-  # change in covariates
-  dX <- model.frame(d_covs_formula, data = subset(gt_data, name == "post")) -
-    model.frame(d_covs_formula, data = subset(gt_data, name == "pre"))
-  if (ncol(dX) > 0) colnames(dX) <- paste0("d", colnames(dX))
+  # pre-treatment covariates and changes in covariates, one row per unit
+  covmat <- gt_covariates(pp, xformla, d_covs_formula)
 
-  # convert two-period panel into one period (wide format)
-  gt_data_outcomes <- data.table::dcast(
-    data.table::as.data.table(gt_data[, c("D", "id", "period", "name", "Y")]),
-    id + D ~ name, value.var = "Y"
-  )
-
-  # merge outcome and covariate data
-  gt_dataX <- cbind.data.frame(gt_data_outcomes, Xpre, dX)
+  # outcomes (one row per unit)
+  gt_dataX <- gt_wide_outcomes(pp)
 
   # treatment dummy variable
   D <- gt_dataX$D
@@ -68,10 +63,6 @@ covid_attgt <- function(gt_data, xformla, d_outcome = FALSE,
   # estimate ATT(g,t) via DRDID
   # drdid_panel is for panel data; setting y0 = 0 adapts it to the levels case
   #-----------------------------------------------------------------------------
-  gt_dataX <- droplevels(gt_dataX)
-  use_formula <- BMisc::toformula("", c(BMisc::rhs_vars(xformla), colnames(dX)))
-  covmat <- model.matrix(use_formula, data = gt_dataX)
-
   # drop collinear columns among untreated units
   covmat2 <- covmat[D == 0, ]
   n_unt <- sum(1 - D)
@@ -79,11 +70,16 @@ covid_attgt <- function(gt_data, xformla, d_outcome = FALSE,
   keep_covs <- precheck_reg$pivot[seq_len(precheck_reg$rank)]
   covmat <- covmat[, keep_covs]
 
+  # sampling weights (.w, one per unit; all 1 without weightsname)
+  w <- pp$pre$.w
+  if (is.null(w)) w <- rep(1, length(Y))
+
   attgt <- DRDID::drdid_panel(
     y1 = Y,
     y0 = rep(0, length(Y)),
     D = D,
     covariates = covmat,
+    i.weights = w / mean(w),
     inffunc = TRUE
   )
 

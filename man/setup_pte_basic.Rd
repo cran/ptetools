@@ -11,9 +11,11 @@ setup_pte_basic(
   idname = NULL,
   data,
   panel = TRUE,
+  weightsname = NULL,
   cband = TRUE,
   alp = 0.05,
   boot_type = "multiplier",
+  bstrap = TRUE,
   gt_type = "att",
   ret_quantile = 0.5,
   probs = NULL,
@@ -37,12 +39,25 @@ setup_pte_basic(
 \item{panel}{Whether the data are panel data.  The default is TRUE.  Set to
 FALSE for repeated cross sections.}
 
+\item{weightsname}{The name of the column that contains sampling weights.
+The default is NULL, in which case no sampling weights are used.}
+
 \item{cband}{whether or not to report a uniform (instead of pointwise)
 confidence band (default is TRUE)}
 
 \item{alp}{significance level; default is 0.05}
 
 \item{boot_type}{which type of bootstrap to use}
+
+\item{bstrap}{whether to use the multiplier bootstrap (\code{TRUE}, the default)
+or purely analytical standard errors (\code{FALSE}) when the group-time
+estimator returns an influence function.  \code{bstrap = FALSE} overrides
+\code{boot_type} (i.e., \code{boot_type = "empirical"} is ignored) and only
+supports pointwise confidence intervals -- if \code{cband = TRUE} is also
+requested, \code{ptetools} falls back to pointwise intervals with a warning.
+Analytical standard errors are not currently supported for continuous
+treatment (\code{gt_type = "dose"}): with \code{bstrap = FALSE}, the multiplier
+bootstrap is used instead, with a warning.}
 
 \item{gt_type}{which type of group-time effects are computed.
 The default is "att".  Different estimation strategies can implement
@@ -56,9 +71,22 @@ this is a specific quantile at which to report results, e.g.,
 which to evaluate the QTT curve (e.g., \code{seq(0.05, 0.95, 0.05)}).
 Defaults to \code{seq(0.05, 0.95, 0.05)} when NULL.}
 
-\item{biters}{number of bootstrap iterations; default is 100}
+\item{biters}{number of bootstrap iterations; default is 100.
+\code{biters = 0} skips the bootstrap: where \code{attgt_fun} returns an
+influence function this is the same as \code{bstrap = FALSE} (analytical,
+pointwise standard errors); where standard errors are only available
+from the bootstrap (the empirical bootstrap, dose-specific effects), the
+point estimates are returned with \code{NA} standard errors.}
 
-\item{cl}{number of clusters to be used when bootstrapping; default is 1}
+\item{cl}{parallel workers for the empirical bootstrap (the multiplier
+bootstrap does not need them); default is 1 (no parallelization). Either
+a number of workers or a cluster object from
+\code{parallel::makeCluster()}. A number uses forked processes on
+Unix/macOS; on Windows, which cannot fork, a cluster with that many
+workers is created and stopped automatically. Cluster workers are
+separate R sessions: they load the installed packages, and functions
+defined in your workspace (e.g. a custom \code{attgt_fun}) must not rely
+on other objects in your workspace.}
 
 \item{call}{keeps track of through the \code{call} from external functions/packages}
 

@@ -1,3 +1,13 @@
+# =============================================================================
+# Title: Aggregation of ATT(g,t) Results
+# Description: pte_aggte() and helpers for aggregating group-time average
+#   treatment effects into overall, group, and dynamic (event-study)
+#   parameters, with multiplier-bootstrap or analytical inference.
+# Author: Brant Callaway
+# Last update: 2026-11-21
+# Date created: 2023-02-14
+# =============================================================================
+
 #' @title Aggregates (g,t)-Specific Results
 #'
 #' @description This is a slight edit of the aggte function from the `did` package.
@@ -39,9 +49,10 @@ pte_aggte <- function(attgt,
   cband <- ptep$cband
   alp <- ptep$alp
   biters <- ptep$biters
+  # clusters for standard errors (NULL: unit level) (#6)
+  cluster <- pte_cluster(ptep)
   data <- ptep$data
   tname <- ptep$tname
-  gname <- ptep$gname
   glist <- sort(unique(group))
   tlist <- sort(unique(time.period))
 
@@ -53,18 +64,29 @@ pte_aggte <- function(attgt,
   originalglist <- glist
   originaltlist <- tlist
 
-  time.period <- sapply(originalt, orig2t, originaltlist)
-  group <- sapply(originalgroup, orig2t, originaltlist)
-  glist <- sapply(originalglist, orig2t, originaltlist)
+  time.period <- orig2t(originalt, originaltlist)
+  group <- orig2t(originalgroup, originaltlist)
+  glist <- orig2t(originalglist, originaltlist)
   tlist <- unique(time.period)
   maxT <- max(time.period)
 
-  weights.ind <- group_weight_data$.w
+  # Normalize sampling weights to mean 1 across units (as `did` does). wif()
+  # combines these weights with pg, which is normalized below; with
+  # unnormalized weights (e.g. population counts) that term scales with the
+  # weight level and the standard errors blow up.
+  weights.ind <- group_weight_data$.w / mean(group_weight_data$.w)
 
   # relative group sizes for all ever-treated groups
-  pg <- sapply(originalglist, function(g) mean(weights.ind * (group_weight_data[, gname] == g)))
-  # normalized so that probabilities sum to 1
-  pg <- pg / sum(pg)
+  # each unit's group in units of tname, from the internal .G (never-treated
+  # units, including those first treated after the sample, are NA here)
+  unit_group <- pte_calendar_time(data, group_weight_data$.G)
+  # pg is the (unnormalized) sample share P(G = g), as in did::aggte(). Do
+  # not normalize it to sum to 1 across treated groups: the aggregation
+  # weights only use ratios of pg, but wif() centers 1{G = g} by pg, which
+  # is the influence function of the share only for P(G = g) itself (#19)
+  pg <- sapply(originalglist, function(g) {
+    mean(weights.ind * (unit_group %in% g))
+  })
 
   # length of this is equal to number of groups
   pgg <- pg
@@ -76,7 +98,8 @@ pte_aggte <- function(attgt,
   keepers <- which(group <= time.period & time.period <= (group + max_e)) ### added second condition to allow for limit on longest period included in att
 
   # n x 1 vector of group variable
-  G <- unlist(lapply(group_weight_data[, gname], orig2t, originaltlist))
+  # (0 for never-treated units)
+  G <- match(unit_group, originaltlist, nomatch = 0)
 
   if (type == "group") {
     # get group specific ATTs
@@ -100,7 +123,8 @@ pte_aggte <- function(attgt,
         weights.agg = pg[whichg] / sum(pg[whichg]),
         wif = NULL
       ))
-      se.g <- getSE(as.matrix(inf.func.g), bstrap = TRUE, biters = biters, alp = alp)
+      se.g <- getSE(as.matrix(inf.func.g), bstrap = bstrap, biters = biters, alp = alp,
+        cluster = cluster)
       list(inf.func = inf.func.g, se = se.g)
     })
 
@@ -114,30 +138,33 @@ pte_aggte <- function(attgt,
     # use multiplier bootstrap (across groups) to get critical value
     # for constructing uniform confidence bands
     selective.crit.val <- stats::qnorm(1 - alp / 2)
+    selective.cband <- FALSE
     if (cband == TRUE) {
       if (bstrap == FALSE) {
         warning("Used bootstrap procedure to compute simultaneous confidence band")
       }
-      selective.crit.val <- mboot2(selective.inf.func.g, biters = biters, alp = alp)$crit_val
+      selective.crit.val <- mboot2(selective.inf.func.g, biters = biters, alp = alp,
+        cluster = cluster)$crit_val
 
       selective.crit.val <- crit_val_checks(selective.crit.val, alp)
+      selective.cband <- isTRUE(attr(selective.crit.val, "cband"))
     }
 
     # get overall att under selective treatment timing
     # (here use pgg instead of pg because we can just look at each group)
     selective.att <- sum(selective.att.g * pgg) / sum(pgg)
 
-    # account for having to estimate pgg in the influence function
-    selective.wif <- NULL
-    if (isTRUE(panel)) {
-      selective.wif <- wif(
-        keepers = 1:length(glist),
-        pg = pgg,
-        weights.ind = weights.ind,
-        G = G,
-        group = group
-      )
-    }
+    # account for having to estimate pgg in the influence function. This
+    # applies to repeated cross sections too: there pgg is a share of all
+    # observations, estimated from the same rows the influence function is
+    # indexed by, as in did::aggte() (#32)
+    selective.wif <- wif(
+      keepers = seq_along(glist),
+      pg = pgg,
+      weights.ind = weights.ind,
+      G = G,
+      group = group
+    )
 
     # get overall influence function
     selective.inf.func <- get_agg_inf_func(
@@ -151,7 +178,8 @@ pte_aggte <- function(attgt,
 
     selective.inf.func <- as.matrix(selective.inf.func)
     # get overall standard error
-    selective.se <- getSE(selective.inf.func, bstrap = bstrap, biters = biters, alp = alp)
+    selective.se <- getSE(selective.inf.func, bstrap = bstrap, biters = biters, alp = alp,
+        cluster = cluster)
     if (!is.na(selective.se)) {
       if ((selective.se <= sqrt(.Machine$double.eps) * 10)) selective.se <- NA
     }
@@ -168,6 +196,7 @@ pte_aggte <- function(attgt,
         selective.inf.func.g = selective.inf.func.g,
         selective.inf.func = selective.inf.func
       ),
+      cband = selective.cband,
       DIDparams = attgt
     ))
   } else if (type == "dynamic") {
@@ -210,10 +239,8 @@ pte_aggte <- function(attgt,
     dynamic.se.inner <- lapply(eseq, function(e) {
       whiche <- which((originalt - originalgroup == e) & (include.balanced.gt))
       pge <- pg[whiche] / (sum(pg[whiche]))
-      wif.e <- NULL
-      if (isTRUE(panel)) {
-        wif.e <- wif(whiche, pg, weights.ind, G, group)
-      }
+      # estimated weights, for panel data and repeated cross sections (#32)
+      wif.e <- wif(whiche, pg, weights.ind, G, group)
       inf.func.e <- as.numeric(get_agg_inf_func(
         att = att,
         inffunc1 = inf_func,
@@ -221,7 +248,8 @@ pte_aggte <- function(attgt,
         weights.agg = pge,
         wif = wif.e
       ))
-      se.e <- getSE(as.matrix(inf.func.e), bstrap = bstrap, biters = biters, alp = alp)
+      se.e <- getSE(as.matrix(inf.func.e), bstrap = bstrap, biters = biters, alp = alp,
+        cluster = cluster)
       list(inf.func = inf.func.e, se = se.e)
     })
 
@@ -231,13 +259,16 @@ pte_aggte <- function(attgt,
     dynamic.inf.func.e <- simplify2array(BMisc::get_list_element(dynamic.se.inner, "inf.func"))
 
     dynamic.crit.val <- stats::qnorm(1 - alp / 2)
+    dynamic.cband <- FALSE
     if (cband == TRUE) {
       if (bstrap == FALSE) {
         warning("Used bootstrap procedure to compute simultaneous confidence band")
       }
-      dynamic.crit.val <- mboot2(dynamic.inf.func.e, biters = biters, alp = alp)$crit_val
+      dynamic.crit.val <- mboot2(dynamic.inf.func.e, biters = biters, alp = alp,
+        cluster = cluster)$crit_val
 
       dynamic.crit.val <- crit_val_checks(dynamic.crit.val, alp)
+      dynamic.cband <- isTRUE(attr(dynamic.crit.val, "cband"))
     }
 
     # get overall average treatment effect
@@ -252,7 +283,8 @@ pte_aggte <- function(attgt,
       wif = NULL
     )
 
-    dynamic.se <- getSE(dynamic.inf.func, bstrap = bstrap, biters = biters, alp = alp)
+    dynamic.se <- getSE(dynamic.inf.func, bstrap = bstrap, biters = biters, alp = alp,
+        cluster = cluster)
     if (!is.na(dynamic.se)) {
       if (dynamic.se <= sqrt(.Machine$double.eps) * 10) dynamic.se <- NA
     }
@@ -269,6 +301,7 @@ pte_aggte <- function(attgt,
         dynamic.inf.func.e = dynamic.inf.func.e,
         dynamic.inf.func = dynamic.inf.func
       ),
+      cband = dynamic.cband,
       min_e = min_e,
       max_e = max_e,
       balance_e = balance_e,
@@ -298,15 +331,17 @@ wif <- function(keepers, pg, weights.ind, G, group) {
   # note: weights are all of the form P(G=g|cond)/sum_cond(P(G=g|cond))
   # this is equal to P(G=g)/sum_cond(P(G=g)) which simplifies things here
 
+  # n x length(keepers) matrix with column k equal to
+  # weights.ind * 1{G == group[k]} - pg[k]; built once and used for both
+  # terms (same arithmetic as computing it column by column)
+  in_group <- outer(G, group[keepers], "==")
+  in_group[is.na(in_group)] <- FALSE
+  centered <- sweep(weights.ind * in_group, 2, pg[keepers])
+
   # effect of estimating weights in the numerator
-  if1 <- sapply(keepers, function(k) {
-    (weights.ind * 1 * BMisc::TorF(G == group[k]) - pg[k]) /
-      sum(pg[keepers])
-  })
+  if1 <- centered / sum(pg[keepers])
   # effect of estimating weights in the denominator
-  if2 <- base::rowSums(sapply(keepers, function(k) {
-    weights.ind * 1 * BMisc::TorF(G == group[k]) - pg[k]
-  })) %*%
+  if2 <- base::rowSums(centered) %*%
     t(pg[keepers] / (sum(pg[keepers])^2))
 
   # return the influence function for the weights
@@ -356,18 +391,26 @@ get_agg_inf_func <- function(att, inffunc1, whichones, weights.agg, wif = NULL) 
 #'  a standard error
 #'
 #' @param thisinffunc An influence function
+#' @param cluster cluster identifiers, one per element of \code{thisinffunc},
+#'  or \code{NULL} for unit-level clustering
 #' @inheritParams pte_aggte
 #'
 #' @return scalar standard error
 #'
 #' @keywords internal
-getSE <- function(thisinffunc, bstrap = TRUE, biters = 100, alp = .05) {
+getSE <- function(thisinffunc, bstrap = TRUE, biters = 100, alp = .05,
+                  cluster = NULL) {
   n <- length(thisinffunc)
   if (bstrap) {
-    bout <- mboot2(thisinffunc, biters = biters, alp = alp)
+    # only the standard error is needed here (#3)
+    bout <- mboot2(thisinffunc, biters = biters, alp = alp, cband = FALSE,
+                   cluster = cluster)
     return(bout$boot_se)
-  } else {
+  } else if (is.null(cluster)) {
     return(sqrt(mean((thisinffunc)^2) / n))
+  } else {
+    # cluster-robust: (1/n) sqrt(sum over clusters of squared sums) (#6)
+    return(sqrt(sum(cluster_sums(thisinffunc, cluster)^2)) / n)
   }
 }
 
@@ -403,7 +446,6 @@ overall_weights <- function(attgt,
   biters <- ptep$biters
   data <- ptep$data
   tname <- ptep$tname
-  gname <- ptep$gname
   glist <- sort(unique(group))
   tlist <- sort(unique(time.period))
 
@@ -415,16 +457,25 @@ overall_weights <- function(attgt,
   originalglist <- glist
   originaltlist <- tlist
 
-  time.period <- sapply(originalt, orig2t, originaltlist)
-  group <- sapply(originalgroup, orig2t, originaltlist)
-  glist <- sapply(originalglist, orig2t, originaltlist)
+  time.period <- orig2t(originalt, originaltlist)
+  group <- orig2t(originalgroup, originaltlist)
+  glist <- orig2t(originalglist, originaltlist)
   tlist <- unique(time.period)
   maxT <- max(time.period)
 
-  weights.ind <- group_weight_data$.w
+  # Normalize sampling weights to mean 1 across units (as `did` does). wif()
+  # combines these weights with pg, which is normalized below; with
+  # unnormalized weights (e.g. population counts) that term scales with the
+  # weight level and the standard errors blow up.
+  weights.ind <- group_weight_data$.w / mean(group_weight_data$.w)
 
   # relative group sizes for all ever-treated groups
-  pg <- sapply(originalglist, function(g) mean(weights.ind * (group_weight_data[, gname] == g)))
+  # each unit's group in units of tname, from the internal .G (never-treated
+  # units, including those first treated after the sample, are NA here)
+  unit_group <- pte_calendar_time(data, group_weight_data$.G)
+  pg <- sapply(originalglist, function(g) {
+    mean(weights.ind * (unit_group %in% g))
+  })
   # normalized so that probabilities sum to 1
   pg <- pg / sum(pg)
 
@@ -451,8 +502,13 @@ overall_weights <- function(attgt,
 
   out_weight <- g_weight[match(group, glist)] * keeper
 
-  # quick sanity check
-  if (sum(out_weight) != 1) stop("something's going wrong calculating overall weights")
+  # sanity check: the weights should sum to 1, up to floating-point rounding
+  # (exact equality rejected valid weights, e.g. off by 4e-16 with many
+  # timing groups, #1)
+  if (!isTRUE(all.equal(sum(out_weight), 1))) {
+    stop("overall weights on ATT(g,t) sum to ", format(sum(out_weight)),
+         ", not 1.", call. = FALSE)
+  }
 
   # following convention of package, return groups and time periods in their original scale
   data.frame(
@@ -462,34 +518,44 @@ overall_weights <- function(attgt,
   )
 }
 
-#' @title Sanity Checks on Critical Values
+#' @title Sanity-Check a Simultaneous Critical Value
 #'
-#' @description A function to perform sanity checks and possibly adjust a
-#'  a critical value to form a uniform confidence band
+#' @description Validates a bootstrapped simultaneous critical value, falling
+#'  back to the pointwise normal critical value if it is degenerate. Whether
+#'  the fallback happened is signaled through the `"cband"` attribute of the
+#'  returned value (`TRUE` if the simultaneous critical value is usable,
+#'  `FALSE` if we fell back to pointwise) -- callers that need to downgrade
+#'  their own `cband` bookkeeping should read that attribute, since this
+#'  function only has access to `crit_val` and `alp`, not the caller's
+#'  `ptep`/`cband` state.
 #'
-#' @param crit_val the critical value
-#' @param alp the significance level
+#' @param crit_val a simultaneous critical value, possibly NA/Inf/degenerate
+#' @param alp significance level
 #'
-#' @return a (possibly adjusted) critical value
-#'
+#' @return the (possibly corrected) critical value, with a `"cband"`
+#'  logical attribute
 #' @export
+#' @keywords internal
 crit_val_checks <- function(crit_val, alp = 0.05) {
+  cband_ok <- TRUE
+
   if (is.na(crit_val) | is.infinite(crit_val)) {
     warning("Simultaneous critival value is NA. This probably happened because we cannot compute t-statistic (std errors are NA). We then report pointwise conf. intervals.")
     crit_val <- stats::qnorm(1 - alp / 2)
-    dp$cband <- FALSE
+    cband_ok <- FALSE
   }
 
   if (crit_val < stats::qnorm(1 - alp / 2)) {
     warning("Simultaneous conf. band is somehow smaller than pointwise one using normal approximation. Since this is unusual, we are reporting pointwise confidence intervals")
     crit_val <- stats::qnorm(1 - alp / 2)
-    dp$cband <- FALSE
+    cband_ok <- FALSE
   }
 
   if (crit_val >= 7) {
     warning("Simultaneous critical value is arguably `too large' to be realible. This usually happens when number of observations per group is small and/or there is no much variation in outcomes.")
   }
 
+  attr(crit_val, "cband") <- cband_ok
   crit_val
 }
 
@@ -517,6 +583,10 @@ crit_val_checks <- function(crit_val, alp = 0.05) {
 #'  bands for dynamic effects, selective treatment timing, or time period
 #'  effects.
 #' @param inf.function The influence function of the chosen aggregated parameters
+#' @param cband Logical indicating whether `crit.val.egt` is a genuine
+#'  simultaneous critical value (`TRUE`) or whether it fell back to the
+#'  pointwise normal critical value, e.g. because standard errors were NA
+#'  (`FALSE`). See [crit_val_checks()].
 #' @param DIDparams A DIDparams object
 #'
 #' @return an aggte_obj
@@ -529,6 +599,7 @@ aggte_obj <- function(overall.att = NULL,
                       se.egt = NULL,
                       crit.val.egt = NULL,
                       inf.function = NULL,
+                      cband = NULL,
                       min_e = NULL,
                       max_e = NULL,
                       balance_e = NULL,
@@ -542,6 +613,7 @@ aggte_obj <- function(overall.att = NULL,
     se.egt = se.egt,
     crit.val.egt = crit.val.egt,
     inf.function = inf.function,
+    cband = cband,
     min_e = min_e,
     max_e = max_e,
     balance_e = balance_e,
@@ -644,6 +716,8 @@ summary.aggte_obj <- function(object, ...) {
     control_group_text <- "Never Treated"
   } else if (control_group == "notyettreated") {
     control_group_text <- "Not Yet Treated"
+  } else if (control_group == "eventuallytreated") {
+    control_group_text <- "Eventually Treated"
   }
 
   if (!is.null(control_group)) {
@@ -661,8 +735,8 @@ summary.aggte_obj <- function(object, ...) {
   est_method <- object$DIDparams$est_method
   if (inherits(est_method, "character")) {
     est_method_text <- est_method
-    if (est_method == "dr") {
-      est_method_text <- "Doubly Robust"
+    if (est_method %in% c("aipw", "dr")) {
+      est_method_text <- "Doubly Robust (AIPW)"
     } else if (est_method == "ipw") {
       est_method_text <- "Inverse Probability Weighting"
     } else if (est_method == "reg") {

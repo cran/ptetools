@@ -10,25 +10,29 @@
   cband = TRUE,
   plot_probs = 0.5,
   plot_ci = NULL,
+  show_att = TRUE,
   ...
 )
 }
 \arguments{
 \item{object}{a \code{pte_qtt} object}
 
-\item{type}{which aggregation to plot: \code{"overall"} (default) or
-\code{"dynamic"}. \code{"group"} is a stub.}
+\item{type}{which aggregation to plot: \code{"overall"} (default),
+\code{"dynamic"}, \code{"group"} or \code{"qtt_minus_att"}.}
 
 \item{cband}{logical; if \code{TRUE} (default), show uniform confidence band;
 if \code{FALSE}, show pointwise intervals. Applies when CIs are displayed.}
 
 \item{plot_probs}{numeric vector of quantile levels to show in the dynamic
-plot. Defaults to \code{0.5} (median). All values must be present in
-\code{object$dynamic$probs}.}
+and group plots. Defaults to \code{0.5} (median). All values must be
+among the estimated quantiles.}
 
 \item{plot_ci}{logical or \code{NULL}. If \code{NULL} (default), CIs are
 shown when \code{length(plot_probs) == 1} and suppressed otherwise. Set
 \code{TRUE} to always show CIs, \code{FALSE} to never show them.}
+
+\item{show_att}{logical; for \code{type = "overall"}, whether to draw the
+overall ATT (default \code{TRUE}, when available).}
 
 \item{...}{unused}
 }
@@ -38,10 +42,21 @@ a \code{ggplot} object
 \description{
 Plot a \code{pte_qtt} object.
 
-For \code{type = "overall"}: QTT curve with quantile on the x-axis.
+For \code{type = "overall"}: QTT curve with quantile on the x-axis. When
+the object holds the overall ATT from the same run, it is drawn as a
+horizontal line, with its pointwise confidence interval shaded
+(\code{show_att}).
+
+For \code{type = "qtt_minus_att"}: the overall curve QTT(tau) - ATT, with
+its band from the same bootstrap draws. A band that excludes 0 at some
+quantile rejects QTT(tau) = ATT for all tau.
 
 For \code{type = "dynamic"}: event-study plot with event time on the x-axis.
 Each selected quantile is a separate colored line. CIs are shown by default
 when a single quantile is plotted, and suppressed by default when multiple
 quantiles are plotted.
+
+For \code{type = "group"}: each cohort's QTT at the selected quantile(s),
+with cohorts on the x-axis; with several quantiles, one colored point per
+quantile. CIs as for \code{type = "dynamic"}.
 }

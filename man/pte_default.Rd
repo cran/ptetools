@@ -15,14 +15,16 @@ pte_default(
   d_outcome = FALSE,
   d_covs_formula = ~-1,
   lagged_outcome_cov = FALSE,
-  est_method = "dr",
+  est_method = "aipw",
   anticipation = 0,
   base_period = "varying",
   control_group = "notyettreated",
   weightsname = NULL,
+  clustervars = NULL,
   cband = TRUE,
   alp = 0.05,
   boot_type = "multiplier",
+  bstrap = TRUE,
   biters = 100,
   cl = 1,
   ...
@@ -55,11 +57,17 @@ to only include pre-treatment covariates.}
 \item{lagged_outcome_cov}{Whether to include the lagged outcome as a covariate.
 Default is FALSE.}
 
-\item{est_method}{Which type of estimation method to use. Default is "dr" for
-doubly robust.  The other option is "reg" for regression adjustment.}
+\item{est_method}{Which type of estimation method to use. The default is
+"aipw" (augmented inverse probability weighting, i.e. doubly robust).
+The other option is "reg" for regression adjustment. "dr" is a
+deprecated alias for "aipw".}
 
-\item{anticipation}{how many periods before the treatment actually takes
-place that it can have an effect on outcomes}
+\item{anticipation}{how long before the treatment actually takes place it
+can already affect outcomes, in units of the time variable \code{tname}
+(e.g., years), as in \code{did::att_gt()}. With unequally spaced periods
+this is not the same as a number of periods. Units first treated more
+than \code{anticipation} after the last period are treated as never
+treated.}
 
 \item{base_period}{The type of base period to use.  This only affects
 the numeric value of results in pre-treatment periods.  Results in
@@ -72,12 +80,24 @@ difference-in-differences applications, but can be unnatural for other
 identification strategies.}
 
 \item{control_group}{Which group is used as the comparison group.
-The default choice is "notyettreated", but
-different estimation strategies can implement their own choices
-for the control group}
+The default choice is "notyettreated" (units not yet treated in either
+period of a group-time comparison, including never-treated units).
+"nevertreated" uses only never-treated units, and "eventuallytreated"
+uses not-yet-treated units excluding the never treated (as in
+\code{setup_pte()}; units first treated after the last period count as
+eventually treated). Different estimation strategies can implement
+their own choices for the control group.}
 
 \item{weightsname}{The name of the column that contains sampling weights.
 The default is NULL, in which case no sampling weights are used.}
+
+\item{clustervars}{The name of a variable to cluster standard errors on,
+in addition to \code{idname} (as in \code{did::att_gt()}): one variable,
+constant over time within each unit (e.g. state when units are
+counties). The default is NULL, which clusters at the unit level.
+Clustering applies to analytical standard errors, the multiplier
+bootstrap (one multiplier per cluster) and the empirical bootstrap
+(whole clusters are resampled).}
 
 \item{cband}{whether or not to report a uniform (instead of pointwise)
 confidence band (default is TRUE)}
@@ -89,11 +109,36 @@ The multiplier bootstrap is generally much faster, but \code{attgt_fun} needs
 to provide an expression for the influence function (which could be challenging
 to figure out).  If no influence function is provided, then the \code{pte}
 package will use the empirical bootstrap no matter what the value of this
-parameter.}
+parameter.  \code{bstrap = FALSE} (purely analytical standard errors) takes
+priority over \code{boot_type}: it is only available when \code{attgt_fun}
+returns an influence function, and it overrides \code{boot_type = "empirical"}.}
 
-\item{biters}{number of bootstrap iterations; default is 100}
+\item{bstrap}{whether to use the multiplier bootstrap (\code{TRUE}, the default)
+or purely analytical standard errors (\code{FALSE}) when the group-time
+estimator returns an influence function.  \code{bstrap = FALSE} overrides
+\code{boot_type} (i.e., \code{boot_type = "empirical"} is ignored) and only
+supports pointwise confidence intervals -- if \code{cband = TRUE} is also
+requested, \code{ptetools} falls back to pointwise intervals with a warning.
+Analytical standard errors are not currently supported for continuous
+treatment (\code{gt_type = "dose"}): with \code{bstrap = FALSE}, the multiplier
+bootstrap is used instead, with a warning.}
 
-\item{cl}{number of clusters to be used when bootstrapping; default is 1}
+\item{biters}{number of bootstrap iterations; default is 100.
+\code{biters = 0} skips the bootstrap: where \code{attgt_fun} returns an
+influence function this is the same as \code{bstrap = FALSE} (analytical,
+pointwise standard errors); where standard errors are only available
+from the bootstrap (the empirical bootstrap, dose-specific effects), the
+point estimates are returned with \code{NA} standard errors.}
+
+\item{cl}{parallel workers for the empirical bootstrap (the multiplier
+bootstrap does not need them); default is 1 (no parallelization). Either
+a number of workers or a cluster object from
+\code{parallel::makeCluster()}. A number uses forked processes on
+Unix/macOS; on Windows, which cannot fork, a cluster with that many
+workers is created and stopped automatically. Cluster workers are
+separate R sessions: they load the installed packages, and functions
+defined in your workspace (e.g. a custom \code{attgt_fun}) must not rely
+on other objects in your workspace.}
 
 \item{...}{additional arguments passed to \code{pte}, such as \code{min_e},
 \code{max_e}, and \code{balance_e} for controlling the event study range.}

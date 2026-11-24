@@ -3,9 +3,104 @@
 # Description: compute.pte (inner loop over groups/time periods) and pte
 #   (main user-facing function) for computing panel treatment effects.
 # Author: Brant Callaway
-# Last update: 2026-05-18
+# Last update: 2026-11-20
 # Date created: 2021-05-14
 # =============================================================================
+
+# --- Warnings collected across (g,t) cells ---------------------------------
+# An attgt_fun runs once per (g,t) cell (and again in every empirical
+# bootstrap draw), so a plain warning() in it can fire dozens of times, and
+# it only knows the internal coding of the group and period. Instead it
+# signals pte_cell_warning(): compute.pte() collects these, labels each with
+# its cell in units of tname, and reports one warning per kind of problem.
+
+#' @title Warn about a problem in one group-time cell
+#'
+#' @description For use inside an \code{attgt_fun}. Signals a warning that
+#'   \code{compute.pte()} (and so \code{pte()}) collects across group-time
+#'   cells instead of issuing one warning per cell. After the loop over
+#'   cells, it gives one warning per distinct \code{summary}, listing each
+#'   affected cell (with the group and period in the original coding of
+#'   \code{gname} and \code{tname}) and its \code{detail}. Warnings are
+#'   reported for the original sample only, not again for each empirical
+#'   bootstrap draw.
+#'
+#'   Called outside \code{compute.pte()}, it is an ordinary warning with
+#'   message \code{"<summary>: <detail>"}. The condition has class
+#'   \code{"pte_cell_warning"}.
+#'
+#' @param summary one line describing the kind of problem. Cells with the
+#'   same \code{summary} are reported together, so it should not depend on
+#'   the cell.
+#' @param detail what happened in this cell, e.g. a share of treated units
+#'   or the names of covariates.
+#'
+#' @return Called for its side effect (a warning); returns \code{NULL}
+#'   invisibly when the warning is muffled.
+#'
+#' @examples
+#' my_attgt <- function(gt_data, ...) {
+#'   n_treated <- sum(gt_data$D[gt_data$name == "post"])
+#'   if (n_treated < 50) {
+#'     pte_cell_warning("Few treated units", paste(n_treated, "treated units"))
+#'   }
+#'   pte_attgt(gt_data, xformula = ~1, d_outcome = TRUE)
+#' }
+#' if (requireNamespace("did", quietly = TRUE)) {
+#'   # one warning, listing the cells of the 2004 and 2006 cohorts
+#'   res <- pte(
+#'     yname = "lemp", gname = "first.treat", tname = "year",
+#'     idname = "countyreal", data = did::mpdta, setup_pte_fun = setup_pte,
+#'     subset_fun = two_by_two_subset, attgt_fun = my_attgt, biters = 0
+#'   )
+#' }
+#'
+#' @export
+pte_cell_warning <- function(summary, detail) {
+  cond <- structure(
+    class = c("pte_cell_warning", "warning", "condition"),
+    list(message = paste0(summary, ": ", detail), call = NULL,
+         summary = summary, detail = detail)
+  )
+  warning(cond)
+  invisible(NULL)
+}
+
+# Reports warnings collected by compute.pte(): one warning per summary,
+# listing the cells (at most max_cells of them). Signals class
+# pte_cell_summary, which bootstrap draws muffle (the problems are reported
+# for the original sample).
+#
+# Arguments: collected (list of list(summary, detail, cell)), max_cells.
+report_cell_warnings <- function(collected, max_cells = 10) {
+  if (length(collected) == 0) return(invisible(NULL))
+  summaries <- vapply(collected, function(x) x$summary, "")
+  for (s in unique(summaries)) {
+    these <- collected[summaries == s]
+    lines <- vapply(these, function(x) paste0(x$cell, ": ", x$detail), "")
+    more <- if (length(lines) > max_cells) {
+      paste0("\n  ... and ", length(lines) - max_cells, " more")
+    } else {
+      ""
+    }
+    msg <- paste0(s, " (", length(these),
+                  if (length(these) == 1) " cell" else " cells", "):\n  ",
+                  paste(utils::head(lines, max_cells), collapse = "\n  "),
+                  more)
+    warning(structure(
+      class = c("pte_cell_summary", "warning", "condition"),
+      list(message = msg, call = NULL)
+    ))
+  }
+  invisible(NULL)
+}
+
+# Evaluates expr without reporting collected cell warnings (bootstrap draws).
+quiet_cell_warnings <- function(expr) {
+  withCallingHandlers(expr, pte_cell_summary = function(w) {
+    invokeRestart("muffleWarning")
+  })
+}
 
 #' @title Heavy-Lifting for pte Function
 #'
@@ -31,27 +126,17 @@ compute.pte <- function(ptep,
   # unpack ptep
   #-----------------------------------------------------------------------------
   data <- ptep$data
-  yname <- ptep$yname
-  gname <- ptep$gname
-  idname <- ptep$idname
-  tname <- ptep$tname
   panel <- ptep$panel
   base_period <- ptep$base_period
-  anticipation <- ptep$anticipation
+  anticipation <- if (is.null(ptep$anticipation)) 0 else ptep$anticipation
   global_fun <- ptep$global_fun
 
 
   data <- as.data.frame(data)
 
-  # setup data
-  G <- data[, gname]
-  if (isTRUE(panel)) {
-    id <- data[, idname]
-  } else {
-    id <- data$.rowid
-  }
-  period <- data[, tname]
-  n <- if (isTRUE(panel)) length(unique(data$id)) else nrow(data)
+  # number of units (panel) or observations (repeated cross sections); the
+  # influence function has one row for each
+  n <- if (isTRUE(panel)) length(unique(data$.id)) else nrow(data)
 
   # pick up all time periods
   time.periods <- ptep$tlist
@@ -70,6 +155,9 @@ compute.pte <- function(ptep,
   # list to hold extra results from gt-specific calculations
   extra_gt_returns <- list()
 
+  # warnings signaled with pte_cell_warning(), reported once after the loop
+  cell_warnings <- list()
+
   if (isTRUE(global_fun)) {
     data$y0 <- attgt_fun(data, ptep, ...)
     stop("global_fun not supported yet...")
@@ -80,7 +168,9 @@ compute.pte <- function(ptep,
     # loop over all groups
     for (g in groups) {
       if (isTRUE(base_period == "universal")) {
-        if (tp == (g - 1 - anticipation)) {
+        # the base period itself: ATT(g, base period) is 0 by construction
+        if (isTRUE(tp == pte_base_period(data, g, tp, anticipation,
+                                         "universal"))) {
           attgt.list[[counter]] <- list(
             att = 0,
             group = g,
@@ -108,7 +198,25 @@ compute.pte <- function(ptep,
       #-----------------------------------------------------------------------------
       # code to estimate attgt using correct relevant data
       #-----------------------------------------------------------------------------
-      attgt <- attgt_fun(gt_data = gt_data, ...)
+      # an error in one cell says which group and period it is (in units of
+      # tname), so users can tell, e.g., which cohort is too small (#17)
+      attgt <- withCallingHandlers(
+        attgt_fun(gt_data = gt_data, ...),
+        error = function(e) {
+          stop("Estimating ATT(g,t) for group ",
+               pte_calendar_time(data, g), ", period ",
+               pte_calendar_time(data, tp), " failed: ",
+               conditionMessage(e), call. = FALSE)
+        },
+        pte_cell_warning = function(w) {
+          cell_warnings[[length(cell_warnings) + 1]] <<- list(
+            summary = w$summary, detail = w$detail,
+            cell = paste0("group ", pte_calendar_time(data, g), ", period ",
+                          pte_calendar_time(data, tp))
+          )
+          invokeRestart("muffleWarning")
+        }
+      )
 
       #-----------------------------------------------------------------------------
       # process attgt results
@@ -146,6 +254,8 @@ compute.pte <- function(ptep,
       #----------------------------------------------------
     }
   }
+
+  report_cell_warnings(cell_warnings)
 
   return(list(attgt.list = attgt.list, inffunc = inffunc, extra_gt_returns = extra_gt_returns))
 }
@@ -221,7 +331,9 @@ compute.pte <- function(ptep,
 #'  to provide an expression for the influence function (which could be challenging
 #'  to figure out).  If no influence function is provided, then the \code{pte}
 #'  package will use the empirical bootstrap no matter what the value of this
-#'  parameter.
+#'  parameter.  \code{bstrap = FALSE} (purely analytical standard errors) takes
+#'  priority over \code{boot_type}: it is only available when \code{attgt_fun}
+#'  returns an influence function, and it overrides \code{boot_type = "empirical"}.
 #'
 #' @param process_dtt_gt_fun An optional function to customize results when
 #'  the gt-specific function returns the distribution of treated and untreated
@@ -284,6 +396,7 @@ pte <- function(yname,
                 cband = TRUE,
                 alp = 0.05,
                 boot_type = "multiplier",
+                bstrap = TRUE,
                 weightsname = NULL,
                 gt_type = "att",
                 ret_quantile = NULL,
@@ -297,6 +410,37 @@ pte <- function(yname,
                 cl = 1,
                 call = NULL,
                 ...) {
+  if (!(is.numeric(biters) && length(biters) == 1 && !is.na(biters) &&
+          biters >= 0 && biters == round(biters))) {
+    stop("biters must be a single non-negative whole number.", call. = FALSE)
+  }
+
+  # biters = 0 skips the bootstrap (#14). Where attgt_fun returns an
+  # influence function this is the same as bstrap = FALSE (analytical,
+  # pointwise standard errors); where standard errors are only available
+  # from the bootstrap (empirical bootstrap, dose-specific effects), the
+  # bootstrap routines return point estimates with NA standard errors.
+  if (biters == 0) {
+    bstrap <- FALSE
+    cband <- FALSE
+  }
+
+  # analytical standard errors are not yet supported for continuous
+  # treatment; fall back to the multiplier bootstrap rather than silently
+  # ignoring the user's request (see dev/NOTES.md). With biters = 0 there is
+  # nothing to fall back to, and process_dose_gt() returns NA instead.
+  if (gt_type == "dose" && isFALSE(bstrap) && biters > 0) {
+    warning("Analytical standard errors are not currently supported for continuous treatment (gt_type = \"dose\"); using the multiplier bootstrap instead.")
+    bstrap <- TRUE
+  }
+
+  # simultaneous (uniform) confidence bands require the multiplier bootstrap;
+  # analytical standard errors only support pointwise confidence intervals
+  if (isFALSE(bstrap) && isTRUE(cband)) {
+    warning("Analytical standard errors only support pointwise confidence intervals; using cband = FALSE.")
+    cband <- FALSE
+  }
+
   ptep <- setup_pte_fun(
     yname = yname,
     gname = gname,
@@ -307,6 +451,7 @@ pte <- function(yname,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
+    bstrap = bstrap,
     gt_type = gt_type,
     weightsname = weightsname,
     ret_quantile = ret_quantile,
@@ -335,9 +480,18 @@ pte <- function(yname,
   # otherwise, we are in the main case where the target is an ATT
 
   # check if no influence function provided,
-  # if yes, go to alternate code for empirical
-  # bootstrap
-  if (all(is.na(res$inffunc)) | ptep$boot_type == "empirical") {
+  # if yes, go to alternate code for empirical bootstrap;
+  # bstrap = FALSE (analytical standard errors) overrides
+  # boot_type = "empirical", but cannot override the lack of an
+  # influence function -- if the attgt_fun did not return one, analytical
+  # standard errors are exactly as infeasible as the multiplier bootstrap,
+  # so we fall back to the empirical bootstrap here too (with a warning if
+  # the user explicitly asked for analytical standard errors).
+  no_inffunc <- all(is.na(res$inffunc))
+  if (no_inffunc | (ptep$boot_type == "empirical" & isTRUE(ptep$bstrap))) {
+    if (no_inffunc && isFALSE(ptep$bstrap) && ptep$biters > 0) {
+      warning("attgt_fun did not return an influence function, so analytical standard errors (bstrap = FALSE) are not available; falling back to the empirical bootstrap.")
+    }
     return(panel_empirical_bootstrap(res$attgt.list,
       ptep,
       setup_pte_fun,
@@ -356,7 +510,10 @@ pte <- function(yname,
   #-----------------------------------------------------------------------------
 
   # overall
-  overall_att <- pte_aggte(att_gt, type = "group", bstrap = TRUE, cband = cband, alp = ptep$alp)
+  # note: pte_aggte() reads bstrap from att_gt$ptep$bstrap, not from an
+  # argument here -- pte_aggte() has no `bstrap` formal, so passing it here
+  # would silently do nothing (it would land in `...`)
+  overall_att <- pte_aggte(att_gt, type = "group", cband = cband, alp = ptep$alp)
 
   # event study
   # ... for max_e and min_e
@@ -365,7 +522,14 @@ pte <- function(yname,
   max_e <- ifelse(is.null(dots$max_e), Inf, dots$max_e)
   balance_e <- dots$balance_e
 
-  event_study <- pte_aggte(att_gt, type = "dynamic", bstrap = TRUE, cband = cband, alp = ptep$alp, min_e = min_e, max_e = max_e, balance_e = balance_e)
+  event_study <- pte_aggte(att_gt, type = "dynamic", cband = cband, alp = ptep$alp, min_e = min_e, max_e = max_e, balance_e = balance_e)
+
+  # If either aggregation fell back to pointwise critical values (e.g.
+  # because standard errors were NA), downgrade our own cband flag so that
+  # summary.pte_results reports "Pointwise" instead of "Simult." -- the
+  # crit.val.egt stored on overall_att/event_study is already correct either
+  # way, this only affects the printed label.
+  if (!isTRUE(overall_att$cband) || !isTRUE(event_study$cband)) ptep$cband <- FALSE
 
   # output
   out <- pte_results(
@@ -425,19 +589,34 @@ pte_default <- function(yname,
                         d_outcome = FALSE,
                         d_covs_formula = ~ -1,
                         lagged_outcome_cov = FALSE,
-                        est_method = "dr",
+                        est_method = "aipw",
                         anticipation = 0,
                         base_period = "varying",
                         control_group = "notyettreated",
                         weightsname = NULL,
+                        clustervars = NULL,
                         cband = TRUE,
                         alp = 0.05,
                         boot_type = "multiplier",
+                        bstrap = TRUE,
                         biters = 100,
                         cl = 1,
                         ...) {
+  # check est_method (and warn about the deprecated "dr") once, here, rather
+  # than in each (g,t) cell, which may run in parallel workers (#30)
+  est_method <- pte_est_method(est_method)
+
   use_subset_fun <- if (isTRUE(panel)) two_by_two_subset else two_by_two_rcs_subset
   use_attgt_fun <- if (isTRUE(panel)) pte_attgt else did_rcs_attgt
+
+  # Keep only the columns these estimators use. Every (g,t) cell and every
+  # bootstrap sample copies the data, so unused columns are pure overhead.
+  data <- as.data.frame(data)
+  used_cols <- unique(c(
+    yname, gname, tname, idname, weightsname, clustervars,
+    all.vars(xformula), all.vars(d_covs_formula)
+  ))
+  data <- data[, intersect(used_cols, names(data)), drop = FALSE]
 
   if (!isTRUE(panel) && (isTRUE(d_outcome) ||
     !identical(d_covs_formula, ~ -1) ||
@@ -464,9 +643,11 @@ pte_default <- function(yname,
     base_period = base_period,
     control_group = control_group,
     weightsname = weightsname,
+    clustervars = clustervars,
     cband = cband,
     alp = alp,
     boot_type = boot_type,
+    bstrap = bstrap,
     biters = biters,
     cl = cl,
     ...

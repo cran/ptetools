@@ -21,6 +21,7 @@ pte(
   cband = TRUE,
   alp = 0.05,
   boot_type = "multiplier",
+  bstrap = TRUE,
   weightsname = NULL,
   gt_type = "att",
   ret_quantile = NULL,
@@ -125,7 +126,19 @@ The multiplier bootstrap is generally much faster, but \code{attgt_fun} needs
 to provide an expression for the influence function (which could be challenging
 to figure out).  If no influence function is provided, then the \code{pte}
 package will use the empirical bootstrap no matter what the value of this
-parameter.}
+parameter.  \code{bstrap = FALSE} (purely analytical standard errors) takes
+priority over \code{boot_type}: it is only available when \code{attgt_fun}
+returns an influence function, and it overrides \code{boot_type = "empirical"}.}
+
+\item{bstrap}{whether to use the multiplier bootstrap (\code{TRUE}, the default)
+or purely analytical standard errors (\code{FALSE}) when the group-time
+estimator returns an influence function.  \code{bstrap = FALSE} overrides
+\code{boot_type} (i.e., \code{boot_type = "empirical"} is ignored) and only
+supports pointwise confidence intervals -- if \code{cband = TRUE} is also
+requested, \code{ptetools} falls back to pointwise intervals with a warning.
+Analytical standard errors are not currently supported for continuous
+treatment (\code{gt_type = "dose"}): with \code{bstrap = FALSE}, the multiplier
+bootstrap is used instead, with a warning.}
 
 \item{weightsname}{The name of the column that contains sampling weights.
 The default is NULL, in which case no sampling weights are used.}
@@ -165,9 +178,22 @@ return.  This is unused except in cases where the results involve doses.}
 \item{probs}{For \code{gt_type = "qtt"}, a numeric vector of quantile levels at
 which to evaluate the QTT curve.  Defaults to \code{seq(0.05, 0.95, 0.05)}.}
 
-\item{biters}{number of bootstrap iterations; default is 100}
+\item{biters}{number of bootstrap iterations; default is 100.
+\code{biters = 0} skips the bootstrap: where \code{attgt_fun} returns an
+influence function this is the same as \code{bstrap = FALSE} (analytical,
+pointwise standard errors); where standard errors are only available
+from the bootstrap (the empirical bootstrap, dose-specific effects), the
+point estimates are returned with \code{NA} standard errors.}
 
-\item{cl}{number of clusters to be used when bootstrapping; default is 1}
+\item{cl}{parallel workers for the empirical bootstrap (the multiplier
+bootstrap does not need them); default is 1 (no parallelization). Either
+a number of workers or a cluster object from
+\code{parallel::makeCluster()}. A number uses forked processes on
+Unix/macOS; on Windows, which cannot fork, a cluster with that many
+workers is created and stopped automatically. Cluster workers are
+separate R sessions: they load the installed packages, and functions
+defined in your workspace (e.g. a custom \code{attgt_fun}) must not rely
+on other objects in your workspace.}
 
 \item{call}{keeps track of through the \code{call} from external functions/packages}
 

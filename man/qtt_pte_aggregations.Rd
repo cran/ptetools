@@ -20,12 +20,20 @@ potentially useful for debugging.}
 }
 \value{
 named list with elements \code{overall_results},
-\code{dyn_results}, \code{group_results}, \code{F0_overall},
+\code{dyn_results}, \code{group_results} (QTTs), \code{att_results}
+(a list with the \code{overall}, \code{dynamic} and \code{group} ATTs,
+aggregated with the same weights), \code{qtt_minus_att_results} (a
+list with \code{overall}, \code{dynamic} and \code{group} curves
+QTT(tau) - ATT, column \code{qtt_minus_att}), \code{F0_overall} and
 \code{F1_overall}
 }
 \description{
 Aggregate group-time F0/F1 distributions into QTT curves at
-the overall, group, and dynamic level.  CDFs are mixed first using
-\code{BMisc::combine_ecdfs} and then inverted at all quantile levels in
-\code{probs}, avoiding the bias from averaging scalar QTTs.
+the overall, group, and dynamic level.  CDFs are mixed first, with the
+aggregation weights, and the mixtures are then inverted at all quantile
+levels in \code{probs}, avoiding the bias from averaging scalar QTTs.
+The mixtures are computed exactly, from every support point of the
+cells' CDFs (\code{BMisc::combine_ecdfs()} without \code{y.seq}), which
+must be step functions (such as those from
+\code{BMisc::weighted_ecdf()}).
 }
